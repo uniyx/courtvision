@@ -1,0 +1,5 @@
+# Tested on Python 3.13
+nba_api==1.11.4
+pandas==3.0.3
+requests==2.34.2
+uvicorn==0.48.0
