@@ -1,10 +1,13 @@
 from pathlib import Path
 from random import choice
+from re import findall
 from urllib.parse import urlencode
 
 import pandas as pd
 from nba_api.stats.endpoints import videodetailsasset
 from nba_api.stats.static import players
+
+from keywords import CONTEXT_KEYWORDS, MISS_KEYWORDS, SHOT_KEYWORDS
 
 
 NBA_STATS_HEADERS = {
@@ -45,6 +48,7 @@ QUERY_PARAMS = {
 
 
 PLAYER_NAME = "Cade Cunningham"
+QUERY_TEXT = "dunks"
 
 
 def build_nba_stats_headers(referer="https://www.nba.com/", rotate_user_agent=False):
@@ -57,6 +61,34 @@ def build_nba_stats_headers(referer="https://www.nba.com/", rotate_user_agent=Fa
 
 def normalize_name(value):
     return " ".join(value.lower().split())
+
+
+def tokenize_query(query_text):
+    return findall(r"[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)?", query_text.lower())
+
+
+def parse_keywords(query_text):
+    tokens = tokenize_query(query_text)
+    context_measure = "PTS"
+    shot_specifiers = set()
+    miss_filter = False
+
+    for token in tokens:
+        if token in CONTEXT_KEYWORDS:
+            context_measure = CONTEXT_KEYWORDS[token]
+        if token in SHOT_KEYWORDS:
+            shot_specifiers.add(SHOT_KEYWORDS[token])
+        if token in MISS_KEYWORDS:
+            miss_filter = True
+
+    if shot_specifiers and context_measure == "PTS":
+        context_measure = "PTS"
+
+    return {
+        "context_measure": context_measure,
+        "shot_specifiers": shot_specifiers,
+        "miss_filter": miss_filter,
+    }
 
 
 def get_player_lookup():
@@ -92,10 +124,12 @@ def resolve_player(player_name):
     raise ValueError(f"No active NBA player found for '{player_name}'.")
 
 
-def build_query_params(player_name=PLAYER_NAME):
+def build_query_params(player_name=PLAYER_NAME, context_measure=None):
     player = resolve_player(player_name)
     params = QUERY_PARAMS.copy()
     params["player_id"] = player["id"]
+    if context_measure:
+        params["context_measure_detailed"] = context_measure
     return params
 
 
@@ -112,9 +146,9 @@ def build_event_link(row):
     return f"https://www.nba.com/stats/events?{urlencode(params)}"
 
 
-def fetch_video_details(player_name=PLAYER_NAME, rotate_user_agent=False):
+def fetch_video_details(player_name=PLAYER_NAME, context_measure=None, rotate_user_agent=False):
     response = videodetailsasset.VideoDetailsAsset(
-        **build_query_params(player_name),
+        **build_query_params(player_name, context_measure=context_measure),
         headers=build_nba_stats_headers(rotate_user_agent=rotate_user_agent),
         timeout=30,
     )
@@ -206,13 +240,45 @@ def process_videos(video_details):
     return formatted[columns].sort_values("Game_Date", ascending=False)
 
 
+def filter_by_shot_specifiers(results, shot_specifiers):
+    if results.empty or not shot_specifiers:
+        return results
+
+    description = results["Description"].fillna("").str.upper()
+    mask = pd.Series(True, index=results.index)
+
+    for shot_specifier in shot_specifiers:
+        mask &= description.str.contains(shot_specifier.upper(), regex=False)
+
+    return results[mask].copy()
+
+
+def apply_keyword_filters(results, keyword_params):
+    filtered = filter_by_shot_specifiers(results, keyword_params["shot_specifiers"])
+    if keyword_params["miss_filter"]:
+        filtered = filtered[filtered["Point_Change"] == 0].copy()
+    return filtered
+
+
+def run_keyword_query(player_name=PLAYER_NAME, query_text=QUERY_TEXT):
+    keyword_params = parse_keywords(query_text)
+    video_details = fetch_video_details(player_name, context_measure=keyword_params["context_measure"])
+    results = process_videos(video_details)
+    return apply_keyword_filters(results, keyword_params)
+
+
 def main():
+    keyword_params = parse_keywords(QUERY_TEXT)
+
     print("Running NBA API query...")
     print(f"Player name: {PLAYER_NAME}")
-    print(f"Query params: {build_query_params()}")
+    print(f"Query text: {QUERY_TEXT}")
+    print(f"Keyword params: {keyword_params}")
+    print(f"Query params: {build_query_params(context_measure=keyword_params['context_measure'])}")
 
-    video_details = fetch_video_details()
+    video_details = fetch_video_details(context_measure=keyword_params["context_measure"])
     results = process_videos(video_details)
+    results = apply_keyword_filters(results, keyword_params)
 
     if results.empty:
         print("No rows returned from the NBA API.")
