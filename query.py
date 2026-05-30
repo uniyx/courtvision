@@ -1,8 +1,10 @@
 from pathlib import Path
+from random import choice
 from urllib.parse import urlencode
 
 import pandas as pd
 from nba_api.stats.endpoints import videodetailsasset
+from nba_api.stats.static import players
 
 
 NBA_STATS_HEADERS = {
@@ -13,9 +15,6 @@ NBA_STATS_HEADERS = {
     "Host": "stats.nba.com",
     "Origin": "https://www.nba.com",
     "Referer": "https://www.nba.com/",
-    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
     "Sec-Fetch-Dest": "empty",
     "Sec-Fetch-Mode": "cors",
     "Sec-Fetch-Site": "same-site",
@@ -25,9 +24,15 @@ NBA_STATS_HEADERS = {
 }
 
 
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:151.0) Gecko/20100101 Firefox/151.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 15.5; rv:151.0) Gecko/20100101 Firefox/151.0",
+]
+
+
 QUERY_PARAMS = {
     "team_id": 0,
-    "player_id": 1641705,
     "context_measure_detailed": "PTS",
     "season": "2025-26",
     "season_type_all_star": "Regular Season",
@@ -37,6 +42,61 @@ QUERY_PARAMS = {
     "period": 0,
     "league_id_nullable": "00",
 }
+
+
+PLAYER_NAME = "Cade Cunningham"
+
+
+def build_nba_stats_headers(referer="https://www.nba.com/", rotate_user_agent=False):
+    headers = NBA_STATS_HEADERS.copy()
+    headers["Referer"] = referer
+    if rotate_user_agent:
+        headers["User-Agent"] = choice(USER_AGENTS)
+    return headers
+
+
+def normalize_name(value):
+    return " ".join(value.lower().split())
+
+
+def get_player_lookup():
+    player_lookup = {}
+    for player in players.get_active_players():
+        player_lookup[normalize_name(player["full_name"])] = player
+    return player_lookup
+
+
+def format_player_options(matches):
+    return ", ".join(player["full_name"] for player in matches[:8])
+
+
+def resolve_player(player_name):
+    normalized = normalize_name(player_name)
+    player_lookup = get_player_lookup()
+
+    if normalized in player_lookup:
+        return player_lookup[normalized]
+
+    matches = [
+        player
+        for player in player_lookup.values()
+        if normalized in {normalize_name(player["first_name"]), normalize_name(player["last_name"])}
+    ]
+
+    if len(matches) == 1:
+        return matches[0]
+
+    if len(matches) > 1:
+        raise ValueError(f"Ambiguous player name '{player_name}'. Matches: {format_player_options(matches)}")
+
+    raise ValueError(f"No active NBA player found for '{player_name}'.")
+
+
+def build_query_params(player_name=PLAYER_NAME):
+    player = resolve_player(player_name)
+    params = QUERY_PARAMS.copy()
+    params["player_id"] = player["id"]
+    return params
 
 
 def build_event_link(row):
@@ -52,10 +112,10 @@ def build_event_link(row):
     return f"https://www.nba.com/stats/events?{urlencode(params)}"
 
 
-def fetch_video_details():
+def fetch_video_details(player_name=PLAYER_NAME, rotate_user_agent=False):
     response = videodetailsasset.VideoDetailsAsset(
-        **QUERY_PARAMS,
-        headers=NBA_STATS_HEADERS,
+        **build_query_params(player_name),
+        headers=build_nba_stats_headers(rotate_user_agent=rotate_user_agent),
         timeout=30,
     )
     return response.get_dict()
@@ -148,7 +208,8 @@ def process_videos(video_details):
 
 def main():
     print("Running NBA API query...")
-    print(f"Query params: {QUERY_PARAMS}")
+    print(f"Player name: {PLAYER_NAME}")
+    print(f"Query params: {build_query_params()}")
 
     video_details = fetch_video_details()
     results = process_videos(video_details)
