@@ -61,7 +61,13 @@ def fetch_video_details():
     return response.get_dict()
 
 
-def video_details_to_dataframe(video_details):
+def calculate_point_change(row):
+    home_change = row["Home_Points_After"] - row["Home_Points_Before"]
+    visitor_change = row["Visitor_Points_After"] - row["Visitor_Points_Before"]
+    return max(home_change, visitor_change)
+
+
+def process_videos(video_details):
     result_sets = video_details["resultSets"]
     playlist = result_sets["playlist"]
     video_urls = result_sets["Meta"]["videoUrls"]
@@ -98,6 +104,17 @@ def video_details_to_dataframe(video_details):
         }
     )
 
+    score_columns = [
+        "Home_Points_Before",
+        "Home_Points_After",
+        "Visitor_Points_Before",
+        "Visitor_Points_After",
+    ]
+    formatted[score_columns] = formatted[score_columns].apply(pd.to_numeric, errors="coerce").fillna(0).astype(int)
+
+    formatted["Point_Change"] = formatted.apply(calculate_point_change, axis=1)
+    formatted["Score_Diff"] = (formatted["Home_Points_Before"] - formatted["Visitor_Points_Before"]).abs()
+    formatted["Score_Diff_After"] = (formatted["Home_Points_After"] - formatted["Visitor_Points_After"]).abs()
     formatted["Video_Link"] = formatted["Video_URL"].apply(
         lambda value: value.get("lurl") if isinstance(value, dict) else None
     )
@@ -119,6 +136,9 @@ def video_details_to_dataframe(video_details):
         "Home_Points_After",
         "Visitor_Points_Before",
         "Visitor_Points_After",
+        "Point_Change",
+        "Score_Diff",
+        "Score_Diff_After",
         "Video_Link",
         "Thumbnail_Link",
         "Event_Link",
@@ -127,26 +147,39 @@ def video_details_to_dataframe(video_details):
 
 
 def main():
-    print("Running NBA API hard query...")
+    print("Running NBA API query...")
     print(f"Query params: {QUERY_PARAMS}")
 
     video_details = fetch_video_details()
-    results = video_details_to_dataframe(video_details)
+    results = process_videos(video_details)
 
     if results.empty:
         print("No rows returned from the NBA API.")
         return
 
     print()
-    print(results[["Game_Date", "Game_Code", "Description", "Video_Link"]].head(10).to_string(index=False))
+    print(
+        results[
+            [
+                "Game_Date",
+                "Game_Code",
+                "Description",
+                "Point_Change",
+                "Score_Diff",
+                "Score_Diff_After",
+                "Video_Link",
+            ]
+        ]
+        .head(10)
+        .to_string(index=False)
+    )
 
-    output_dir = Path(__file__).resolve().parent / "output"
-    output_dir.mkdir(exist_ok=True)
-    output_path = output_dir / "video_details_sample.csv"
+    output_path = Path("output/video_details_sample.csv")
+    output_path.parent.mkdir(exist_ok=True)
     results.to_csv(output_path, index=False)
 
     print()
-    print(f"Wrote CSV: {output_path}")
+    print(f"Wrote CSV: {output_path.resolve()}")
 
 
 if __name__ == "__main__":
