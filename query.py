@@ -5,8 +5,10 @@ from time import sleep
 from urllib.parse import urlencode
 
 import pandas as pd
+import spacy
 from nba_api.stats.endpoints import videodetailsasset
 from nba_api.stats.static import players
+from spacy.matcher import PhraseMatcher
 
 from keywords import CONTEXT_KEYWORDS, MISS_KEYWORDS, PHRASE_KEYWORDS, SHOT_KEYWORDS
 
@@ -50,6 +52,7 @@ QUERY_PARAMS = {
 
 PLAYER_NAME = "Cade Cunningham"
 QUERY_TEXT = "dunks"
+TEXT_QUERY = "cade cunningham dunks"
 
 
 def build_nba_stats_headers(referer="https://www.nba.com/", rotate_user_agent=False):
@@ -74,6 +77,7 @@ def add_shot_specifiers(shot_specifiers, value):
 
 
 def parse_keywords(query_text):
+    """Map basketball words into NBA API context and local filter settings."""
     tokens = tokenize_query(query_text)
     normalized_query = " ".join(tokens)
     context_measure = "PTS"
@@ -104,10 +108,76 @@ def parse_keywords(query_text):
 
 
 def get_player_lookup():
+    """Build the current active-player lookup used by both spaCy and ID resolution."""
     player_lookup = {}
     for player in players.get_active_players():
         player_lookup[normalize_name(player["full_name"])] = player
     return player_lookup
+
+
+def load_nlp():
+    """Load spaCy's English model.
+
+    spaCy does not know anything NBA-specific here. We use it as the text
+    engine that tokenizes user queries for our project-defined phrase matcher.
+    """
+    try:
+        return spacy.load("en_core_web_sm")
+    except OSError as error:
+        raise RuntimeError(
+            "spaCy model 'en_core_web_sm' is not installed. "
+            "Install requirements.txt before running text query extraction."
+        ) from error
+
+
+def build_player_matcher(nlp):
+    """Teach spaCy which full player names to recognize.
+
+    nba_api provides the active-player list. We turn those names into spaCy
+    phrase patterns, then PhraseMatcher can find names like "lebron james"
+    inside a longer query.
+    """
+    matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
+    player_lookup = get_player_lookup()
+    patterns = [nlp.make_doc(player["full_name"]) for player in player_lookup.values()]
+    matcher.add("PLAYER", patterns)
+    return matcher, player_lookup
+
+
+def remove_span_text(text, span):
+    return (text[: span.start_char] + " " + text[span.end_char :]).strip()
+
+
+def extract_query_parts(query_text, nlp=None, player_matcher=None, player_lookup=None):
+    """Split a full text query into player identity and basketball keywords.
+
+    Example: "lebron james driving layup" becomes:
+    - player_name: "LeBron James"
+    - keyword_text: "driving layup"
+
+    The player span comes from spaCy PhraseMatcher. The basketball meaning
+    still comes from our keyword dictionaries in keywords.py.
+    """
+    nlp = nlp or load_nlp()
+    if player_matcher is None or player_lookup is None:
+        player_matcher, player_lookup = build_player_matcher(nlp)
+
+    doc = nlp(query_text)
+    matches = player_matcher(doc)
+
+    if not matches:
+        raise ValueError(f"No full player name found in query: '{query_text}'")
+
+    match_id, start, end = max(matches, key=lambda match: match[2] - match[1])
+    player_span = doc[start:end]
+    player_name = player_lookup[normalize_name(player_span.text)]["full_name"]
+    keyword_text = remove_span_text(query_text, player_span)
+
+    return {
+        "player_name": player_name,
+        "keyword_text": keyword_text,
+        "keyword_params": parse_keywords(keyword_text),
+    }
 
 
 def format_player_options(matches):
@@ -137,6 +207,7 @@ def resolve_player(player_name):
 
 
 def build_query_params(player_name=PLAYER_NAME, context_measure=None):
+    """Resolve a player name and merge it into the NBA endpoint params."""
     player = resolve_player(player_name)
     params = QUERY_PARAMS.copy()
     params["player_id"] = player["id"]
@@ -159,6 +230,7 @@ def build_event_link(row):
 
 
 def fetch_video_details(player_name=PLAYER_NAME, context_measure=None, rotate_user_agent=False, retries=2):
+    """Fetch raw VideoDetailsAsset data, retrying transient non-JSON NBA responses."""
     last_error = None
 
     for attempt in range(retries + 1):
@@ -185,6 +257,7 @@ def calculate_point_change(row):
 
 
 def process_videos(video_details):
+    """Normalize the raw NBA playlist and video metadata into a DataFrame."""
     result_sets = video_details["resultSets"]
     playlist = result_sets["playlist"]
     video_urls = result_sets["Meta"]["videoUrls"]
@@ -277,6 +350,7 @@ def filter_by_shot_specifiers(results, shot_specifiers):
 
 
 def apply_keyword_filters(results, keyword_params):
+    """Apply local filters that are easier to handle after the NBA response."""
     filtered = filter_by_shot_specifiers(results, keyword_params["shot_specifiers"])
     if keyword_params["miss_filter"]:
         filtered = filtered[filtered["Point_Change"] == 0].copy()
@@ -290,18 +364,33 @@ def run_keyword_query(player_name=PLAYER_NAME, query_text=QUERY_TEXT):
     return apply_keyword_filters(results, keyword_params)
 
 
+def run_text_query(query_text=TEXT_QUERY):
+    """Run the full current pipeline from one text query string."""
+    query_parts = extract_query_parts(query_text)
+    video_details = fetch_video_details(
+        query_parts["player_name"],
+        context_measure=query_parts["keyword_params"]["context_measure"],
+    )
+    results = process_videos(video_details)
+    return apply_keyword_filters(results, query_parts["keyword_params"])
+
+
 def main():
-    keyword_params = parse_keywords(QUERY_TEXT)
+    query_parts = extract_query_parts(TEXT_QUERY)
 
     print("Running NBA API query...")
-    print(f"Player name: {PLAYER_NAME}")
-    print(f"Query text: {QUERY_TEXT}")
-    print(f"Keyword params: {keyword_params}")
-    print(f"Query params: {build_query_params(context_measure=keyword_params['context_measure'])}")
+    print(f"Text query: {TEXT_QUERY}")
+    print(f"Player name: {query_parts['player_name']}")
+    print(f"Keyword text: {query_parts['keyword_text']}")
+    print(f"Keyword params: {query_parts['keyword_params']}")
+    print(f"Query params: {build_query_params(query_parts['player_name'], context_measure=query_parts['keyword_params']['context_measure'])}")
 
-    video_details = fetch_video_details(context_measure=keyword_params["context_measure"])
+    video_details = fetch_video_details(
+        query_parts["player_name"],
+        context_measure=query_parts["keyword_params"]["context_measure"],
+    )
     results = process_videos(video_details)
-    results = apply_keyword_filters(results, keyword_params)
+    results = apply_keyword_filters(results, query_parts["keyword_params"])
 
     if results.empty:
         print("No rows returned from the NBA API.")
