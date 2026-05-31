@@ -1,6 +1,7 @@
 import spacy
 from functools import lru_cache
 from nba_api.stats.static import players, teams
+from rapidfuzz import fuzz, process
 from spacy.matcher import PhraseMatcher
 
 from keywords import (
@@ -26,10 +27,36 @@ TEAM_ALIASES = {
     "sixers": "Philadelphia 76ers",
     "wolves": "Minnesota Timberwolves",
     "t-wolves": "Minnesota Timberwolves",
+    "t wolves": "Minnesota Timberwolves",
+    "twolves": "Minnesota Timberwolves",
     "mavs": "Dallas Mavericks",
     "blazers": "Portland Trail Blazers",
     "cavs": "Cleveland Cavaliers",
 }
+
+
+PLAYER_ALIASES = {
+    "bron": "LeBron James",
+    "king james": "LeBron James",
+    "lebron": "LeBron James",
+    "steph": "Stephen Curry",
+    "chef curry": "Stephen Curry",
+    "curry": "Stephen Curry",
+    "kd": "Kevin Durant",
+    "joker": "Nikola Jokic",
+    "jokic": "Nikola Jokic",
+    "giannis": "Giannis Antetokounmpo",
+    "wemby": "Victor Wembanyama",
+    "wembanyama": "Victor Wembanyama",
+    "harden": "James Harden",
+    "luka": "Luka Doncic",
+    "ant": "Anthony Edwards",
+    "ant man": "Anthony Edwards",
+}
+
+
+PLAYER_FUZZY_THRESHOLD = 82
+TEAM_FUZZY_THRESHOLD = 84
 
 
 CONTROL_WORDS = {
@@ -146,6 +173,11 @@ def get_player_lookup():
     player_lookup = {}
     for player in players.get_active_players():
         player_lookup[normalize_name(player["full_name"])] = player
+    full_name_lookup = {normalize_name(player["full_name"]): player for player in player_lookup.values()}
+    for alias, full_name in PLAYER_ALIASES.items():
+        normalized_full_name = normalize_name(full_name)
+        if normalized_full_name in full_name_lookup:
+            player_lookup[normalize_name(alias)] = full_name_lookup[normalized_full_name]
     return player_lookup
 
 
@@ -224,6 +256,78 @@ def get_default_matchers():
     return nlp, player_matcher, player_lookup, team_matcher, team_lookup
 
 
+@lru_cache(maxsize=1)
+def ignored_entity_tokens():
+    tokens = CONTROL_WORDS | control_word_tokens()
+    for keyword_map in (CONTEXT_KEYWORDS, SHOT_KEYWORDS):
+        tokens.update(keyword_map.keys())
+    tokens.update(MISS_KEYWORDS)
+    return tokens
+
+
+def is_searchable_span(span):
+    tokens = tokenize_query(span.text)
+    if not tokens:
+        return False
+    return not any(token in ignored_entity_tokens() for token in tokens)
+
+
+def candidate_spans(doc, max_tokens=3):
+    spans = []
+    for start in range(len(doc)):
+        for end in range(start + 1, min(len(doc), start + max_tokens) + 1):
+            span = doc[start:end]
+            if is_searchable_span(span):
+                spans.append(span)
+    return sorted(spans, key=lambda span: len(tokenize_query(span.text)), reverse=True)
+
+
+def best_fuzzy_choice(text, choices, threshold):
+    match = process.extractOne(
+        normalize_name(text),
+        choices,
+        scorer=fuzz.WRatio,
+        score_cutoff=threshold,
+    )
+    if not match:
+        return None
+    value, score, index = match
+    tied_matches = process.extract(
+        normalize_name(text),
+        choices,
+        scorer=fuzz.WRatio,
+        score_cutoff=max(threshold, score - 2),
+        limit=3,
+    )
+    if len(tied_matches) > 1 and tied_matches[1][1] >= score - 2:
+        return None
+    return value
+
+
+def overlaps_blocked_range(span, blocked_ranges):
+    return any(span.start_char < end and span.end_char > start for start, end in blocked_ranges)
+
+
+def resolve_entity_from_spans(doc, lookup, threshold, blocked_ranges=None):
+    blocked_ranges = blocked_ranges or []
+    choices = list(lookup.keys())
+    for span in candidate_spans(doc):
+        if overlaps_blocked_range(span, blocked_ranges):
+            continue
+        normalized = normalize_name(span.text)
+        if normalized in lookup:
+            return lookup[normalized], (span.start_char, span.end_char)
+
+    for span in candidate_spans(doc):
+        if overlaps_blocked_range(span, blocked_ranges):
+            continue
+        choice = best_fuzzy_choice(span.text, choices, threshold)
+        if choice:
+            return lookup[choice], (span.start_char, span.end_char)
+
+    return None, None
+
+
 def remove_control_words(text):
     tokens = [
         token
@@ -247,13 +351,16 @@ def extract_query_parts(query_text, nlp=None, player_matcher=None, player_lookup
     doc = nlp(query_text)
     player_matches = player_matcher(doc)
 
-    if not player_matches:
-        raise ValueError(f"No full player name found in query: '{query_text}'")
-
-    match_id, start, end = max(player_matches, key=lambda match: match[2] - match[1])
-    player_span = doc[start:end]
-    player = player_lookup[normalize_name(player_span.text)]
-    remove_ranges = [(player_span.start_char, player_span.end_char)]
+    if player_matches:
+        match_id, start, end = max(player_matches, key=lambda match: match[2] - match[1])
+        player_span = doc[start:end]
+        player = player_lookup[normalize_name(player_span.text)]
+        remove_ranges = [(player_span.start_char, player_span.end_char)]
+    else:
+        player, player_range = resolve_entity_from_spans(doc, player_lookup, PLAYER_FUZZY_THRESHOLD)
+        if not player:
+            raise ValueError(f"No player name found in query: '{query_text}'")
+        remove_ranges = [player_range]
 
     opponent_team = None
     team_matches = team_matcher(doc)
@@ -263,6 +370,15 @@ def extract_query_parts(query_text, nlp=None, player_matcher=None, player_lookup
         team_span = doc[start:end]
         opponent_team = team_lookup[normalize_name(team_span.text)]
         remove_ranges.append((team_span.start_char, team_span.end_char))
+    else:
+        opponent_team, team_range = resolve_entity_from_spans(
+            doc,
+            team_lookup,
+            TEAM_FUZZY_THRESHOLD,
+            blocked_ranges=remove_ranges,
+        )
+        if opponent_team:
+            remove_ranges.append(team_range)
 
     keyword_text = remove_control_words(remove_char_ranges(query_text, remove_ranges))
     season_type = parse_season_type(query_text)
@@ -304,5 +420,9 @@ def resolve_player(player_name):
 
     if len(matches) > 1:
         raise ValueError(f"Ambiguous player name '{player_name}'. Matches: {format_player_options(matches)}")
+
+    choice = best_fuzzy_choice(player_name, list(player_lookup.keys()), PLAYER_FUZZY_THRESHOLD)
+    if choice:
+        return player_lookup[choice]
 
     raise ValueError(f"No active NBA player found for '{player_name}'.")
