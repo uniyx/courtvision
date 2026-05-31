@@ -222,3 +222,75 @@ SCORE_CONTEXT_KEYWORDS = {
     "goahead",
     "go-ahead",
 }
+
+
+SEASON_TYPE_KEYWORDS = {
+    "playoff": "Playoffs",
+    "playoffs": "Playoffs",
+    "postseason": "Playoffs",
+    "regular": "Regular Season",
+    "season": "Regular Season",
+    "regular season": "Regular Season",
+}
+
+
+# NBA Stats uses season-month buckets for the Month parameter:
+# 0 = all months, 1 = October, 2 = November, etc.
+MONTH_KEYWORDS = {
+    "october": 1,
+    "oct": 1,
+    "november": 2,
+    "nov": 2,
+    "december": 3,
+    "dec": 3,
+    "january": 4,
+    "jan": 4,
+    "february": 5,
+    "feb": 5,
+    "march": 6,
+    "mar": 6,
+    "april": 7,
+    "apr": 7,
+    "may": 8,
+    "june": 9,
+    "jun": 9,
+    "july": 10,
+    "jul": 10,
+}
+
+
+PERIOD_KEYWORDS = {
+    "q1": 1,
+    "1q": 1,
+    "first": 1,
+    "first quarter": 1,
+    "1st": 1,
+    "1st quarter": 1,
+    "q2": 2,
+    "2q": 2,
+    "second": 2,
+    "second quarter": 2,
+    "2nd": 2,
+    "2nd quarter": 2,
+    "q3": 3,
+    "3q": 3,
+    "third": 3,
+    "third quarter": 3,
+    "3rd": 3,
+    "3rd quarter": 3,
+    "q4": 4,
+    "4q": 4,
+    "fourth": 4,
+    "fourth quarter": 4,
+    "4th": 4,
+    "4th quarter": 4,
+    "ot": 5,
+    "overtime": 5,
+    "first overtime": 5,
+    "double overtime": 6,
+    "2ot": 6,
+    "second overtime": 6,
+    "triple overtime": 7,
+    "3ot": 7,
+    "third overtime": 7,
+}

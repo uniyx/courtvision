@@ -2,15 +2,24 @@ from pathlib import Path
 from random import choice
 from re import findall
 from time import sleep
+from unicodedata import category, normalize
 from urllib.parse import urlencode
 
 import pandas as pd
 import spacy
 from nba_api.stats.endpoints import videodetailsasset
-from nba_api.stats.static import players
+from nba_api.stats.static import players, teams
 from spacy.matcher import PhraseMatcher
 
-from keywords import CONTEXT_KEYWORDS, MISS_KEYWORDS, PHRASE_KEYWORDS, SHOT_KEYWORDS
+from keywords import (
+    CONTEXT_KEYWORDS,
+    MISS_KEYWORDS,
+    MONTH_KEYWORDS,
+    PERIOD_KEYWORDS,
+    PHRASE_KEYWORDS,
+    SEASON_TYPE_KEYWORDS,
+    SHOT_KEYWORDS,
+)
 
 
 NBA_STATS_HEADERS = {
@@ -52,7 +61,31 @@ QUERY_PARAMS = {
 
 PLAYER_NAME = "Cade Cunningham"
 QUERY_TEXT = "dunks"
-TEXT_QUERY = "cade cunningham dunks"
+TEXT_QUERY = "victor wembanyama dunk playoffs against thunder in may q4"
+
+
+TEAM_ALIASES = {
+    "okc": "Oklahoma City Thunder",
+    "thunder": "Oklahoma City Thunder",
+    "gsw": "Golden State Warriors",
+    "dubs": "Golden State Warriors",
+    "warriors": "Golden State Warriors",
+    "la lakers": "Los Angeles Lakers",
+    "lakers": "Los Angeles Lakers",
+    "clips": "LA Clippers",
+    "clippers": "LA Clippers",
+    "knicks": "New York Knicks",
+    "sixers": "Philadelphia 76ers",
+    "76ers": "Philadelphia 76ers",
+    "wolves": "Minnesota Timberwolves",
+    "t-wolves": "Minnesota Timberwolves",
+    "mavs": "Dallas Mavericks",
+    "blazers": "Portland Trail Blazers",
+    "trail blazers": "Portland Trail Blazers",
+    "suns": "Phoenix Suns",
+    "spurs": "San Antonio Spurs",
+    "cavs": "Cleveland Cavaliers",
+}
 
 
 def build_nba_stats_headers(referer="https://www.nba.com/", rotate_user_agent=False):
@@ -64,6 +97,7 @@ def build_nba_stats_headers(referer="https://www.nba.com/", rotate_user_agent=Fa
 
 
 def normalize_name(value):
+    value = "".join(character for character in normalize("NFKD", value) if category(character) != "Mn")
     return " ".join(value.lower().split())
 
 
@@ -107,12 +141,82 @@ def parse_keywords(query_text):
     }
 
 
+def parse_season_type(query_text):
+    """Detect NBA season type words such as playoffs or regular season."""
+    tokens = tokenize_query(query_text)
+    normalized_query = " ".join(tokens)
+
+    for phrase, season_type in sorted(SEASON_TYPE_KEYWORDS.items(), key=lambda item: len(tokenize_query(item[0])), reverse=True):
+        normalized_phrase = " ".join(tokenize_query(phrase))
+        if normalized_phrase and normalized_phrase in normalized_query:
+            return season_type
+
+    return QUERY_PARAMS["season_type_all_star"]
+
+
+def parse_month(query_text):
+    """Detect NBA Stats season-month bucket keywords."""
+    tokens = tokenize_query(query_text)
+
+    for token in tokens:
+        if token in MONTH_KEYWORDS:
+            return MONTH_KEYWORDS[token]
+
+    return QUERY_PARAMS["month"]
+
+
+def parse_period(query_text):
+    """Detect quarter/period keywords for the NBA Stats Period parameter."""
+    tokens = tokenize_query(query_text)
+    normalized_query = " ".join(tokens)
+
+    for phrase, period in sorted(PERIOD_KEYWORDS.items(), key=lambda item: len(tokenize_query(item[0])), reverse=True):
+        normalized_phrase = " ".join(tokenize_query(phrase))
+        if normalized_phrase and normalized_phrase in normalized_query:
+            return period
+
+    return QUERY_PARAMS["period"]
+
+
+def control_word_tokens():
+    phrase_tokens = set()
+    for phrase in [*MONTH_KEYWORDS.keys(), *PERIOD_KEYWORDS.keys(), *SEASON_TYPE_KEYWORDS.keys()]:
+        phrase_tokens.update(tokenize_query(phrase))
+    return phrase_tokens
+
+
 def get_player_lookup():
     """Build the current active-player lookup used by both spaCy and ID resolution."""
     player_lookup = {}
     for player in players.get_active_players():
         player_lookup[normalize_name(player["full_name"])] = player
     return player_lookup
+
+
+def get_team_lookup():
+    """Build team lookup patterns from nba_api plus a few common aliases."""
+    team_lookup = {}
+    all_teams = teams.get_teams()
+    full_name_lookup = {team["full_name"]: team for team in all_teams}
+
+    for team in all_teams:
+        for key in {team["full_name"], team["nickname"], team["abbreviation"]}:
+            team_lookup[normalize_name(key)] = team
+
+    city_counts = {}
+    for team in all_teams:
+        city_counts[normalize_name(team["city"])] = city_counts.get(normalize_name(team["city"]), 0) + 1
+
+    for team in all_teams:
+        city_key = normalize_name(team["city"])
+        if city_counts[city_key] == 1:
+            team_lookup[city_key] = team
+
+    for alias, full_name in TEAM_ALIASES.items():
+        if full_name in full_name_lookup:
+            team_lookup[normalize_name(alias)] = full_name_lookup[full_name]
+
+    return team_lookup
 
 
 def load_nlp():
@@ -139,16 +243,62 @@ def build_player_matcher(nlp):
     """
     matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
     player_lookup = get_player_lookup()
-    patterns = [nlp.make_doc(player["full_name"]) for player in player_lookup.values()]
+    pattern_texts = set()
+    for player in player_lookup.values():
+        pattern_texts.add(player["full_name"])
+        pattern_texts.add(normalize_name(player["full_name"]))
+    patterns = [nlp.make_doc(pattern_text) for pattern_text in pattern_texts]
     matcher.add("PLAYER", patterns)
     return matcher, player_lookup
+
+
+def build_team_matcher(nlp):
+    """Teach spaCy which NBA team names and aliases to recognize."""
+    matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
+    team_lookup = get_team_lookup()
+    patterns = [nlp.make_doc(name) for name in team_lookup.keys()]
+    matcher.add("TEAM", patterns)
+    return matcher, team_lookup
 
 
 def remove_span_text(text, span):
     return (text[: span.start_char] + " " + text[span.end_char :]).strip()
 
 
-def extract_query_parts(query_text, nlp=None, player_matcher=None, player_lookup=None):
+def remove_char_ranges(text, ranges):
+    cleaned = text
+    for start, end in sorted(ranges, reverse=True):
+        cleaned = cleaned[:start] + " " + cleaned[end:]
+    return " ".join(cleaned.split())
+
+
+def remove_control_words(text):
+    tokens = [
+        token
+        for token in tokenize_query(text)
+        if token
+        not in {
+            "against",
+            "versus",
+            "vs",
+            "v",
+            "in",
+            "during",
+            "playoff",
+            "playoffs",
+            "postseason",
+            "regular",
+            "season",
+            "quarter",
+            "quarters",
+            "overtime",
+            *control_word_tokens(),
+        }
+    ]
+    return " ".join(tokens)
+
+
+def extract_query_parts(query_text, nlp=None, player_matcher=None, player_lookup=None, team_matcher=None, team_lookup=None):
     """Split a full text query into player identity and basketball keywords.
 
     Example: "lebron james driving layup" becomes:
@@ -161,20 +311,41 @@ def extract_query_parts(query_text, nlp=None, player_matcher=None, player_lookup
     nlp = nlp or load_nlp()
     if player_matcher is None or player_lookup is None:
         player_matcher, player_lookup = build_player_matcher(nlp)
+    if team_matcher is None or team_lookup is None:
+        team_matcher, team_lookup = build_team_matcher(nlp)
 
     doc = nlp(query_text)
-    matches = player_matcher(doc)
+    player_matches = player_matcher(doc)
 
-    if not matches:
+    if not player_matches:
         raise ValueError(f"No full player name found in query: '{query_text}'")
 
-    match_id, start, end = max(matches, key=lambda match: match[2] - match[1])
+    match_id, start, end = max(player_matches, key=lambda match: match[2] - match[1])
     player_span = doc[start:end]
     player_name = player_lookup[normalize_name(player_span.text)]["full_name"]
-    keyword_text = remove_span_text(query_text, player_span)
+    remove_ranges = [(player_span.start_char, player_span.end_char)]
+
+    opponent_team = None
+    team_matches = team_matcher(doc)
+    if team_matches:
+        team_match = max(team_matches, key=lambda match: match[2] - match[1])
+        match_id, start, end = team_match
+        team_span = doc[start:end]
+        opponent_team = team_lookup[normalize_name(team_span.text)]
+        remove_ranges.append((team_span.start_char, team_span.end_char))
+
+    keyword_text = remove_control_words(remove_char_ranges(query_text, remove_ranges))
+    season_type = parse_season_type(query_text)
+    month = parse_month(query_text)
+    period = parse_period(query_text)
 
     return {
         "player_name": player_name,
+        "opponent_team": opponent_team["full_name"] if opponent_team else None,
+        "opponent_team_id": opponent_team["id"] if opponent_team else 0,
+        "season_type": season_type,
+        "month": month,
+        "period": period,
         "keyword_text": keyword_text,
         "keyword_params": parse_keywords(keyword_text),
     }
@@ -206,13 +377,27 @@ def resolve_player(player_name):
     raise ValueError(f"No active NBA player found for '{player_name}'.")
 
 
-def build_query_params(player_name=PLAYER_NAME, context_measure=None):
+def build_query_params(
+    player_name=PLAYER_NAME,
+    context_measure=None,
+    season_type=None,
+    opponent_team_id=0,
+    month=None,
+    period=None,
+):
     """Resolve a player name and merge it into the NBA endpoint params."""
     player = resolve_player(player_name)
     params = QUERY_PARAMS.copy()
     params["player_id"] = player["id"]
     if context_measure:
         params["context_measure_detailed"] = context_measure
+    if season_type:
+        params["season_type_all_star"] = season_type
+    params["opponent_team_id"] = opponent_team_id
+    if month is not None:
+        params["month"] = month
+    if period is not None:
+        params["period"] = period
     return params
 
 
@@ -229,14 +414,30 @@ def build_event_link(row):
     return f"https://www.nba.com/stats/events?{urlencode(params)}"
 
 
-def fetch_video_details(player_name=PLAYER_NAME, context_measure=None, rotate_user_agent=False, retries=2):
+def fetch_video_details(
+    player_name=PLAYER_NAME,
+    context_measure=None,
+    season_type=None,
+    opponent_team_id=0,
+    month=None,
+    period=None,
+    rotate_user_agent=False,
+    retries=2,
+):
     """Fetch raw VideoDetailsAsset data, retrying transient non-JSON NBA responses."""
     last_error = None
 
     for attempt in range(retries + 1):
         try:
             response = videodetailsasset.VideoDetailsAsset(
-                **build_query_params(player_name, context_measure=context_measure),
+                **build_query_params(
+                    player_name,
+                    context_measure=context_measure,
+                    season_type=season_type,
+                    opponent_team_id=opponent_team_id,
+                    month=month,
+                    period=period,
+                ),
                 headers=build_nba_stats_headers(rotate_user_agent=rotate_user_agent),
                 timeout=30,
             )
@@ -370,6 +571,10 @@ def run_text_query(query_text=TEXT_QUERY):
     video_details = fetch_video_details(
         query_parts["player_name"],
         context_measure=query_parts["keyword_params"]["context_measure"],
+        season_type=query_parts["season_type"],
+        opponent_team_id=query_parts["opponent_team_id"],
+        month=query_parts["month"],
+        period=query_parts["period"],
     )
     results = process_videos(video_details)
     return apply_keyword_filters(results, query_parts["keyword_params"])
@@ -381,13 +586,24 @@ def main():
     print("Running NBA API query...")
     print(f"Text query: {TEXT_QUERY}")
     print(f"Player name: {query_parts['player_name']}")
+    print(f"Opponent team: {query_parts['opponent_team']}")
+    print(f"Season type: {query_parts['season_type']}")
+    print(f"Month: {query_parts['month']}")
+    print(f"Period: {query_parts['period']}")
     print(f"Keyword text: {query_parts['keyword_text']}")
     print(f"Keyword params: {query_parts['keyword_params']}")
-    print(f"Query params: {build_query_params(query_parts['player_name'], context_measure=query_parts['keyword_params']['context_measure'])}")
+    print(
+        "Query params: "
+        f"{build_query_params(query_parts['player_name'], context_measure=query_parts['keyword_params']['context_measure'], season_type=query_parts['season_type'], opponent_team_id=query_parts['opponent_team_id'], month=query_parts['month'], period=query_parts['period'])}"
+    )
 
     video_details = fetch_video_details(
         query_parts["player_name"],
         context_measure=query_parts["keyword_params"]["context_measure"],
+        season_type=query_parts["season_type"],
+        opponent_team_id=query_parts["opponent_team_id"],
+        month=query_parts["month"],
+        period=query_parts["period"],
     )
     results = process_videos(video_details)
     results = apply_keyword_filters(results, query_parts["keyword_params"])
