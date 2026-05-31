@@ -1,13 +1,14 @@
 from pathlib import Path
 from random import choice
 from re import findall
+from time import sleep
 from urllib.parse import urlencode
 
 import pandas as pd
 from nba_api.stats.endpoints import videodetailsasset
 from nba_api.stats.static import players
 
-from keywords import CONTEXT_KEYWORDS, MISS_KEYWORDS, SHOT_KEYWORDS
+from keywords import CONTEXT_KEYWORDS, MISS_KEYWORDS, PHRASE_KEYWORDS, SHOT_KEYWORDS
 
 
 NBA_STATS_HEADERS = {
@@ -67,17 +68,28 @@ def tokenize_query(query_text):
     return findall(r"[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)?", query_text.lower())
 
 
+def add_shot_specifiers(shot_specifiers, value):
+    for specifier in value.split("|"):
+        shot_specifiers.add(specifier)
+
+
 def parse_keywords(query_text):
     tokens = tokenize_query(query_text)
+    normalized_query = " ".join(tokens)
     context_measure = "PTS"
     shot_specifiers = set()
     miss_filter = False
+
+    for phrase, specifier in PHRASE_KEYWORDS.items():
+        normalized_phrase = " ".join(tokenize_query(phrase))
+        if normalized_phrase and normalized_phrase in normalized_query:
+            add_shot_specifiers(shot_specifiers, specifier)
 
     for token in tokens:
         if token in CONTEXT_KEYWORDS:
             context_measure = CONTEXT_KEYWORDS[token]
         if token in SHOT_KEYWORDS:
-            shot_specifiers.add(SHOT_KEYWORDS[token])
+            add_shot_specifiers(shot_specifiers, SHOT_KEYWORDS[token])
         if token in MISS_KEYWORDS:
             miss_filter = True
 
@@ -146,13 +158,24 @@ def build_event_link(row):
     return f"https://www.nba.com/stats/events?{urlencode(params)}"
 
 
-def fetch_video_details(player_name=PLAYER_NAME, context_measure=None, rotate_user_agent=False):
-    response = videodetailsasset.VideoDetailsAsset(
-        **build_query_params(player_name, context_measure=context_measure),
-        headers=build_nba_stats_headers(rotate_user_agent=rotate_user_agent),
-        timeout=30,
-    )
-    return response.get_dict()
+def fetch_video_details(player_name=PLAYER_NAME, context_measure=None, rotate_user_agent=False, retries=2):
+    last_error = None
+
+    for attempt in range(retries + 1):
+        try:
+            response = videodetailsasset.VideoDetailsAsset(
+                **build_query_params(player_name, context_measure=context_measure),
+                headers=build_nba_stats_headers(rotate_user_agent=rotate_user_agent),
+                timeout=30,
+            )
+            return response.get_dict()
+        except Exception as error:
+            last_error = error
+            if attempt == retries:
+                break
+            sleep(1 + attempt)
+
+    raise RuntimeError(f"NBA API request failed for {player_name} ({context_measure}).") from last_error
 
 
 def calculate_point_change(row):
