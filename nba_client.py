@@ -1,6 +1,6 @@
-from random import choice
 from time import sleep
 
+from fake_useragent import UserAgent
 from nba_api.stats.endpoints import videodetailsasset
 
 
@@ -21,17 +21,20 @@ NBA_STATS_HEADERS = {
 }
 
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:151.0) Gecko/20100101 Firefox/151.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:151.0) Gecko/20100101 Firefox/151.0",
-    "Mozilla/5.0 (X11; Linux x86_64; rv:151.0) Gecko/20100101 Firefox/151.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:149.0) Gecko/20100101 Firefox/149.0",
-]
+FALLBACK_USER_AGENT = NBA_STATS_HEADERS["User-Agent"]
 
 
-def choose_user_agent():
-    return choice(USER_AGENTS)
+def build_desktop_user_agent():
+    try:
+        user_agent = UserAgent(
+            browsers=["Chrome", "Firefox"],
+            os=["Windows", "Mac OS X"],
+            platforms=["desktop"],
+            fallback=FALLBACK_USER_AGENT,
+        )
+        return user_agent.random
+    except Exception:
+        return FALLBACK_USER_AGENT
 
 
 QUERY_PARAMS = {
@@ -54,7 +57,7 @@ def build_nba_stats_headers(
     headers = NBA_STATS_HEADERS.copy()
     headers["Referer"] = referer
     if rotate_user_agent:
-        headers["User-Agent"] = choose_user_agent()
+        headers["User-Agent"] = build_desktop_user_agent()
     return headers
 
 
@@ -87,6 +90,7 @@ def fetch_video_details(
     opponent_team_id=0,
     month=None,
     period=None,
+    headers=None,
     rotate_user_agent=False,
     retries=2,
 ):
@@ -104,7 +108,7 @@ def fetch_video_details(
                     month=month,
                     period=period,
                 ),
-                headers=build_nba_stats_headers(rotate_user_agent=rotate_user_agent),
+                headers=headers or build_nba_stats_headers(rotate_user_agent=rotate_user_agent),
                 timeout=30,
             )
             return response.get_dict()

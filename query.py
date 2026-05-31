@@ -45,6 +45,7 @@ def fetch_video_details(
     opponent_team_id=0,
     month=None,
     period=None,
+    headers=None,
     rotate_user_agent=False,
     retries=2,
 ):
@@ -56,6 +57,7 @@ def fetch_video_details(
         opponent_team_id=opponent_team_id,
         month=month,
         period=period,
+        headers=headers,
         rotate_user_agent=rotate_user_agent,
         retries=retries,
     )
