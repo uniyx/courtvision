@@ -5,11 +5,15 @@ module centralizes browser-like headers, user-agent generation, params, and
 retry behavior.
 """
 
+import logging
 from time import sleep
 
 from fake_useragent import UserAgent
 from nba_api.stats.endpoints import playbyplayv3
 from nba_api.stats.endpoints import videodetailsasset
+
+
+logger = logging.getLogger(__name__)
 
 
 NBA_STATS_HEADERS = {
@@ -51,7 +55,7 @@ QUERY_PARAMS = {
     "context_measure_detailed": "PTS",
     "season": "2025-26",
     "season_type_all_star": "Regular Season",
-    "last_n_games": 200,
+    "last_n_games": 105,
     "month": 0,
     "opponent_team_id": 0,
     "period": 0,
@@ -108,6 +112,7 @@ def fetch_video_details(
     headers=None,
     rotate_user_agent=False,
     retries=2,
+    timeout=30,
 ):
     """Fetch raw VideoDetailsAsset data, retrying transient non-JSON NBA responses."""
     last_error = None
@@ -128,19 +133,36 @@ def fetch_video_details(
                     period=period,
                 ),
                 headers=headers or build_nba_stats_headers(rotate_user_agent=rotate_user_agent),
-                timeout=30,
+                timeout=timeout,
             )
             return response.get_dict()
         except Exception as error:
             last_error = error
+            logger.warning(
+                "VideoDetailsAsset failed for player=%s context=%s season=%s season_type=%s "
+                "opponent_team_id=%s month=%s period=%s attempt=%s/%s error=%r",
+                player["full_name"],
+                context_measure,
+                season,
+                season_type,
+                opponent_team_id,
+                month,
+                period,
+                attempt + 1,
+                retries + 1,
+                error,
+            )
             if attempt == retries:
                 break
             sleep(1 + attempt)
 
-    raise RuntimeError(f"NBA API request failed for {player['full_name']} ({context_measure}).") from last_error
+    error_detail = f"{type(last_error).__name__}: {last_error}" if last_error else "unknown error"
+    raise RuntimeError(
+        f"NBA video details request failed for {player['full_name']} ({context_measure}): {error_detail}"
+    ) from last_error
 
 
-def fetch_play_by_play(game_id, headers=None, rotate_user_agent=False, retries=2):
+def fetch_play_by_play(game_id, headers=None, rotate_user_agent=False, retries=2, timeout=10):
     """Fetch PlayByPlayV3 rows for one game so video rows can be enriched with clock data."""
     last_error = None
 
@@ -149,13 +171,22 @@ def fetch_play_by_play(game_id, headers=None, rotate_user_agent=False, retries=2
             response = playbyplayv3.PlayByPlayV3(
                 game_id=game_id,
                 headers=headers or build_nba_stats_headers(rotate_user_agent=rotate_user_agent),
-                timeout=30,
+                timeout=timeout,
             )
             return response.get_data_frames()[0]
         except Exception as error:
             last_error = error
+            logger.warning(
+                "PlayByPlayV3 failed for game_id=%s attempt=%s/%s timeout=%s error=%r",
+                game_id,
+                attempt + 1,
+                retries + 1,
+                timeout,
+                error,
+            )
             if attempt == retries:
                 break
             sleep(1 + attempt)
 
-    raise RuntimeError(f"NBA play-by-play request failed for game {game_id}.") from last_error
+    error_detail = f"{type(last_error).__name__}: {last_error}" if last_error else "unknown error"
+    raise RuntimeError(f"NBA play-by-play request failed for game {game_id}: {error_detail}") from last_error

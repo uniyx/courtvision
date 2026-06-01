@@ -6,6 +6,35 @@ from urllib.parse import urlencode
 import pandas as pd
 
 
+VIDEO_COLUMNS = [
+    "Game_ID",
+    "Event_Index",
+    "Game_Date",
+    "Game_Code",
+    "Period",
+    "Home_Team",
+    "Visitor_Team",
+    "Description",
+    "Home_Points_Before",
+    "Home_Points_After",
+    "Visitor_Points_Before",
+    "Visitor_Points_After",
+    "Home_Score_Diff_Before",
+    "Home_Score_Diff_After",
+    "Point_Change",
+    "Score_Diff",
+    "Score_Diff_After",
+    "Scoring_Side",
+    "Scoring_Margin_Before",
+    "Scoring_Margin_After",
+    "Is_Game_Tying",
+    "Is_Go_Ahead",
+    "Video_Link",
+    "Thumbnail_Link",
+    "Event_Link",
+]
+
+
 def build_event_link(row):
     """Build the stable NBA stats event page link for a play."""
     game_id = str(row["Game_ID"])
@@ -30,7 +59,7 @@ def process_videos(video_details):
     print(f"video URL rows: {len(video_urls)}")
 
     if not playlist:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=VIDEO_COLUMNS)
 
     # NBA returns compact field names in playlist rows. Rename once here so
     # downstream search/UI code can use readable column names.
@@ -103,34 +132,7 @@ def process_videos(video_details):
     )
     formatted["Event_Link"] = formatted.apply(build_event_link, axis=1)
 
-    columns = [
-        "Game_ID",
-        "Event_Index",
-        "Game_Date",
-        "Game_Code",
-        "Period",
-        "Home_Team",
-        "Visitor_Team",
-        "Description",
-        "Home_Points_Before",
-        "Home_Points_After",
-        "Visitor_Points_Before",
-        "Visitor_Points_After",
-        "Home_Score_Diff_Before",
-        "Home_Score_Diff_After",
-        "Point_Change",
-        "Score_Diff",
-        "Score_Diff_After",
-        "Scoring_Side",
-        "Scoring_Margin_Before",
-        "Scoring_Margin_After",
-        "Is_Game_Tying",
-        "Is_Go_Ahead",
-        "Video_Link",
-        "Thumbnail_Link",
-        "Event_Link",
-    ]
-    return formatted[columns].sort_values("Game_Date", ascending=False)
+    return formatted[VIDEO_COLUMNS].sort_values("Game_Date", ascending=False)
 
 
 def parse_clock_seconds(clock):
@@ -189,6 +191,8 @@ def filter_by_shot_specifiers(results, shot_specifiers):
     """Require every requested shot descriptor to appear in the play text."""
     if results.empty or not shot_specifiers:
         return results
+    if "Description" not in results.columns:
+        return results.iloc[0:0].copy()
 
     description = results["Description"].fillna("").str.upper()
     mask = pd.Series(True, index=results.index)
@@ -202,6 +206,10 @@ def filter_by_shot_specifiers(results, shot_specifiers):
 def filter_by_score_context(results, score_filter):
     if results.empty or not score_filter:
         return results
+    if score_filter == "GAME_TYING" and "Is_Game_Tying" not in results.columns:
+        return results.iloc[0:0].copy()
+    if score_filter == "GO_AHEAD" and "Is_Go_Ahead" not in results.columns:
+        return results.iloc[0:0].copy()
     if score_filter == "GAME_TYING":
         return results[results["Is_Game_Tying"]].copy()
     if score_filter == "GO_AHEAD":
@@ -212,14 +220,17 @@ def filter_by_score_context(results, score_filter):
 def filter_by_clutch(results, clutch_seconds):
     if results.empty or clutch_seconds is None:
         return results
-    if "Seconds_Remaining" not in results.columns:
+    if "Period" not in results.columns or "Score_Diff" not in results.columns:
         return results.iloc[0:0].copy()
 
+    approximate_mask = results["Period"].ge(4) & results["Score_Diff"].le(5)
+    if "Seconds_Remaining" not in results.columns:
+        return results[approximate_mask].copy()
+
     clutch_mask = (
-        results["Period"].ge(4)
+        approximate_mask
         & results["Seconds_Remaining"].notna()
         & results["Seconds_Remaining"].le(clutch_seconds)
-        & results["Score_Diff"].le(5)
     )
     return results[clutch_mask].copy()
 
@@ -228,6 +239,8 @@ def apply_keyword_filters(results, keyword_params):
     """Apply local filters that are easier to handle after the NBA response."""
     filtered = filter_by_shot_specifiers(results, keyword_params["shot_specifiers"])
     if keyword_params["miss_filter"]:
+        if "Point_Change" not in filtered.columns:
+            return filtered.iloc[0:0].copy()
         filtered = filtered[filtered["Point_Change"] == 0].copy()
     filtered = filter_by_score_context(filtered, keyword_params.get("score_filter"))
     filtered = filter_by_clutch(filtered, keyword_params.get("clutch_seconds"))

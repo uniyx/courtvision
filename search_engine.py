@@ -4,6 +4,7 @@ Lower-level modules handle parsing, API calls, and DataFrame cleanup. This
 module is the stable entry point that ties those pieces into one workflow.
 """
 
+import logging
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -12,6 +13,9 @@ from formatters import apply_keyword_filters, enrich_with_play_by_play, process_
 from keywords import MONTH_LABELS, PERIOD_LABELS
 from nba_client import build_nba_stats_headers, build_query_params, fetch_play_by_play, fetch_video_details
 from parsing import build_player_matcher, build_team_matcher, extract_query_parts, load_nlp
+
+
+logger = logging.getLogger(__name__)
 
 
 def format_seconds(seconds):
@@ -49,10 +53,21 @@ class SearchResult:
 class SearchEngine:
     """NBA video search orchestrator."""
 
-    def __init__(self, season="2025-26", rotate_user_agent=True, retries=2):
+    def __init__(
+        self,
+        season="2025-26",
+        rotate_user_agent=True,
+        retries=2,
+        video_timeout=30,
+        play_by_play_timeout=10,
+        use_play_by_play=False,
+    ):
         self.season = season
         self.rotate_user_agent = rotate_user_agent
         self.retries = retries
+        self.video_timeout = video_timeout
+        self.play_by_play_timeout = play_by_play_timeout
+        self.use_play_by_play = use_play_by_play
         self.play_by_play_cache = {}
 
         # Matcher setup is the expensive local work. Keep it on the engine
@@ -98,13 +113,17 @@ class SearchEngine:
         if not action:
             action = keyword_params["context_measure"].lower()
 
+        season_type = query_parts["season_type"]
+        season_label = f"{self.season} season"
+        if season_type == "Regular Season":
+            season_label = f"{self.season} regular season"
+        elif season_type:
+            season_label = f"{self.season} {season_type.lower()} season"
+
         pieces = [
             f"{query_parts['player_name']} {action}",
-            f"during the {self.season} season",
+            f"during the {season_label}",
         ]
-
-        if query_parts["season_type"]:
-            pieces.append(f"in the {query_parts['season_type']}")
         if query_parts["opponent_team"]:
             pieces.append(f"against the {query_parts['opponent_team']}")
         if MONTH_LABELS.get(query_parts["month"]):
@@ -112,10 +131,13 @@ class SearchEngine:
         if PERIOD_LABELS.get(query_parts["period"]):
             pieces.append(f"during the {PERIOD_LABELS[query_parts['period']]}")
         if keyword_params.get("clutch_seconds"):
-            pieces.append(
-                f"in the final {format_seconds(keyword_params['clutch_seconds'])} "
-                "of the 4th quarter or overtime with the score within 5 points"
-            )
+            if self.use_play_by_play:
+                pieces.append(
+                    f"in the final {format_seconds(keyword_params['clutch_seconds'])} "
+                    "of the 4th quarter or overtime with the score within 5 points"
+                )
+            else:
+                pieces.append("in clutch situations, approximated as 4th quarter or overtime with the score within 5 points")
         if keyword_params.get("score_filter") == "GAME_TYING":
             pieces.append("that tied the game")
         if keyword_params.get("score_filter") == "GO_AHEAD":
@@ -126,15 +148,35 @@ class SearchEngine:
     def fetch_play_by_play_for_results(self, results, headers):
         """Fetch play-by-play clocks for the games represented in a result set."""
         play_by_play_by_game = {}
-        for game_id in sorted(results["Game_ID"].dropna().astype(str).unique()):
-            if game_id not in self.play_by_play_cache:
-                self.play_by_play_cache[game_id] = fetch_play_by_play(
-                    game_id,
-                    headers=headers,
-                    retries=self.retries,
-                )
+        warnings = []
+        game_ids = sorted(results["Game_ID"].dropna().astype(str).unique())
+        logger.info("Fetching play-by-play clock data for %s games", len(game_ids))
+        logger.debug("Play-by-play game IDs: %s", game_ids)
+
+        for game_id in game_ids:
+            try:
+                if game_id not in self.play_by_play_cache:
+                    logger.debug("Fetching PlayByPlayV3 for game_id=%s", game_id)
+                    self.play_by_play_cache[game_id] = fetch_play_by_play(
+                        game_id,
+                        headers=headers,
+                        retries=self.retries,
+                        timeout=self.play_by_play_timeout,
+                    )
+                else:
+                    logger.debug("Using cached PlayByPlayV3 for game_id=%s", game_id)
+            except Exception as error:
+                logger.warning("Skipping PlayByPlayV3 enrichment for game_id=%s error=%r", game_id, error)
+                warnings.append(f"Could not fetch play-by-play clock data for game {game_id}: {type(error).__name__}: {error}")
+                continue
             play_by_play_by_game[game_id] = self.play_by_play_cache[game_id]
-        return play_by_play_by_game
+
+        logger.info(
+            "Play-by-play enrichment fetched=%s failed=%s",
+            len(play_by_play_by_game),
+            len(warnings),
+        )
+        return play_by_play_by_game, warnings
 
     def search(self, query_text):
         """Run the complete search pipeline and return results plus metadata."""
@@ -143,29 +185,56 @@ class SearchEngine:
         headers = build_nba_stats_headers(rotate_user_agent=self.rotate_user_agent)
         keyword_params = query_parts["keyword_params"]
 
-        video_details = fetch_video_details(
-            query_parts["player"],
-            context_measure=query_parts["keyword_params"]["context_measure"],
-            season=self.season,
-            season_type=query_parts["season_type"],
-            opponent_team_id=query_parts["opponent_team_id"],
-            month=query_parts["month"],
-            period=query_parts["period"],
-            headers=headers,
-            retries=self.retries,
-        )
-
-        raw_results = process_videos(video_details)
         warnings = []
 
-        if keyword_params.get("clutch_seconds") and not raw_results.empty:
+        try:
+            video_details = fetch_video_details(
+                query_parts["player"],
+                context_measure=query_parts["keyword_params"]["context_measure"],
+                season=self.season,
+                season_type=query_parts["season_type"],
+                opponent_team_id=query_parts["opponent_team_id"],
+                month=query_parts["month"],
+                period=query_parts["period"],
+                headers=headers,
+                retries=self.retries,
+                timeout=self.video_timeout,
+            )
+        except Exception as error:
+            warnings.append(f"Could not fetch video details: {type(error).__name__}: {error}")
+            empty_results = pd.DataFrame()
+            return SearchResult(
+                query=query_text,
+                interpretation=self.build_interpretation(query_parts),
+                query_parts=query_parts,
+                query_params=query_params,
+                raw_results=empty_results,
+                results=empty_results,
+                user_agent=headers["User-Agent"],
+                warnings=warnings,
+            )
+
+        raw_results = process_videos(video_details)
+
+        if keyword_params.get("clutch_seconds") and self.use_play_by_play and not raw_results.empty:
             try:
                 preliminary_params = {**keyword_params, "clutch_seconds": None}
                 preliminary_results = apply_keyword_filters(raw_results, preliminary_params)
-                play_by_play_by_game = self.fetch_play_by_play_for_results(preliminary_results, headers)
-                results_source = enrich_with_play_by_play(preliminary_results, play_by_play_by_game)
+                preliminary_results = preliminary_results[
+                    preliminary_results["Period"].ge(4)
+                    & preliminary_results["Score_Diff"].le(5)
+                ].copy()
+                play_by_play_by_game, clock_warnings = self.fetch_play_by_play_for_results(
+                    preliminary_results,
+                    headers,
+                )
+                warnings.extend(clock_warnings)
+                if play_by_play_by_game:
+                    results_source = enrich_with_play_by_play(preliminary_results, play_by_play_by_game)
+                else:
+                    results_source = preliminary_results
             except Exception as error:
-                results_source = raw_results
+                results_source = preliminary_results if "preliminary_results" in locals() else raw_results
                 warnings.append(f"Could not enrich results with play-by-play clock data: {error}")
         else:
             results_source = raw_results
@@ -175,6 +244,8 @@ class SearchEngine:
         # Empty result causes are useful to surface later in notebooks/API/UI.
         if raw_results.empty:
             warnings.append("The NBA API returned no rows for the parsed query parameters.")
+        elif keyword_params.get("clutch_seconds") and not self.use_play_by_play:
+            warnings.append("PlayByPlayV3 is disabled; clutch filtering uses period and score margin only.")
         elif keyword_params.get("clutch_seconds") and "Seconds_Remaining" not in results_source.columns:
             warnings.append("Clutch filtering needs play-by-play clock data, but no clock data was available.")
         elif results.empty:
