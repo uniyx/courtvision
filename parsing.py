@@ -1,15 +1,14 @@
+"""Convert user text into structured search parameters."""
+
 from functools import lru_cache
 
 from entities import (
     PLAYER_FUZZY_THRESHOLD,
     TEAM_FUZZY_THRESHOLD,
-    best_fuzzy_choice,
     build_player_matcher,
     build_team_matcher,
     candidate_spans as entity_candidate_spans,
     get_default_matchers,
-    get_player_lookup,
-    get_team_lookup,
     load_nlp,
     resolve_entity_from_spans,
     resolve_player,
@@ -46,6 +45,7 @@ CONTROL_WORDS = {
 
 
 def sorted_keyword_items(keyword_map):
+    """Prefer longer phrases so 'step back three' wins before 'three'."""
     return sorted(keyword_map.items(), key=lambda item: len(tokenize_query(item[0])), reverse=True)
 
 
@@ -67,6 +67,8 @@ def parse_keywords(query_text):
     shot_specifiers = set()
     miss_filter = False
 
+    # Phrase keywords can imply multiple local filters, such as
+    # "step back three" -> {"STEP BACK", "3PT"}.
     for phrase, specifier in SORTED_PHRASE_KEYWORDS:
         normalized_phrase = " ".join(tokenize_query(phrase))
         if normalized_phrase and normalized_phrase in normalized_query:
@@ -129,6 +131,7 @@ def parse_period(query_text):
 
 @lru_cache(maxsize=1)
 def control_word_tokens():
+    """Words that describe filters but should not be fuzzy-matched as entities."""
     phrase_tokens = set()
     for phrase in [*MONTH_KEYWORDS.keys(), *PERIOD_KEYWORDS.keys(), *SEASON_TYPE_KEYWORDS.keys()]:
         phrase_tokens.update(tokenize_query(phrase))
@@ -137,6 +140,7 @@ def control_word_tokens():
 
 @lru_cache(maxsize=1)
 def ignored_entity_tokens():
+    """Vocabulary that should not become a player/team fuzzy candidate."""
     tokens = CONTROL_WORDS | control_word_tokens()
     for keyword_map in (CONTEXT_KEYWORDS, SHOT_KEYWORDS):
         tokens.update(keyword_map.keys())
@@ -149,6 +153,7 @@ def candidate_spans(doc, max_tokens=3):
 
 
 def remove_control_words(text):
+    """Remove non-action connector/filter words before keyword parsing."""
     tokens = [
         token
         for token in tokenize_query(text)
@@ -171,8 +176,10 @@ def extract_query_parts(query_text, nlp=None, player_matcher=None, player_lookup
     doc = nlp(query_text)
     player_matches = player_matcher(doc)
 
+    # Exact entity phrases win. Fuzzy matching only runs when spaCy's
+    # deterministic PhraseMatcher does not find a player/team span.
     if player_matches:
-        match_id, start, end = max(player_matches, key=lambda match: match[2] - match[1])
+        _, start, end = max(player_matches, key=lambda match: match[2] - match[1])
         player_span = doc[start:end]
         player = player_lookup[normalize_name(player_span.text)]
         remove_ranges = [(player_span.start_char, player_span.end_char)]
@@ -191,7 +198,7 @@ def extract_query_parts(query_text, nlp=None, player_matcher=None, player_lookup
     team_matches = team_matcher(doc)
     if team_matches:
         team_match = max(team_matches, key=lambda match: match[2] - match[1])
-        match_id, start, end = team_match
+        _, start, end = team_match
         team_span = doc[start:end]
         opponent_team = team_lookup[normalize_name(team_span.text)]
         remove_ranges.append((team_span.start_char, team_span.end_char))
@@ -207,6 +214,10 @@ def extract_query_parts(query_text, nlp=None, player_matcher=None, player_lookup
             remove_ranges.append(team_range)
 
     keyword_text = remove_control_words(remove_char_ranges(query_text, remove_ranges))
+
+    # Endpoint-level filters are parsed from the original query. Local action
+    # keywords are parsed after removing entity names so names like "Curry" do
+    # not accidentally become basketball action text.
     season_type = parse_season_type(query_text)
     month = parse_month(query_text)
     period = parse_period(query_text)

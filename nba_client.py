@@ -1,3 +1,10 @@
+"""NBA Stats API request helpers.
+
+The stats endpoints are unofficial and sensitive to request shape, so this
+module centralizes browser-like headers, user-agent generation, params, and
+retry behavior.
+"""
+
 from time import sleep
 
 from fake_useragent import UserAgent
@@ -25,6 +32,7 @@ FALLBACK_USER_AGENT = NBA_STATS_HEADERS["User-Agent"]
 
 
 def build_desktop_user_agent():
+    """Generate a desktop Chrome/Firefox UA, falling back to a known-good string."""
     try:
         user_agent = UserAgent(
             browsers=["Chrome", "Firefox"],
@@ -54,6 +62,7 @@ def build_nba_stats_headers(
     referer="https://www.nba.com/",
     rotate_user_agent=False,
 ):
+    """Build headers for stats.nba.com requests."""
     headers = NBA_STATS_HEADERS.copy()
     headers["Referer"] = referer
     if rotate_user_agent:
@@ -64,15 +73,19 @@ def build_nba_stats_headers(
 def build_query_params(
     player,
     context_measure=None,
+    season=None,
     season_type=None,
     opponent_team_id=0,
     month=None,
     period=None,
 ):
+    """Build VideoDetailsAsset params from resolved player/query fields."""
     params = QUERY_PARAMS.copy()
     params["player_id"] = player["id"]
     if context_measure:
         params["context_measure_detailed"] = context_measure
+    if season:
+        params["season"] = season
     if season_type:
         params["season_type_all_star"] = season_type
     params["opponent_team_id"] = opponent_team_id
@@ -86,6 +99,7 @@ def build_query_params(
 def fetch_video_details(
     player,
     context_measure=None,
+    season=None,
     season_type=None,
     opponent_team_id=0,
     month=None,
@@ -99,10 +113,14 @@ def fetch_video_details(
 
     for attempt in range(retries + 1):
         try:
+            # nba_api does the final HTTP call, but we supply the headers and
+            # full parameter set so the rest of the project stays independent
+            # from endpoint quirks.
             response = videodetailsasset.VideoDetailsAsset(
                 **build_query_params(
                     player,
                     context_measure=context_measure,
+                    season=season,
                     season_type=season_type,
                     opponent_team_id=opponent_team_id,
                     month=month,

@@ -1,3 +1,9 @@
+"""Explicit shorthand that nba_api's official names do not cover.
+
+Full player names and official team names come from nba_api. This file is for
+fan shorthand, nicknames, and common spellings we want to support directly.
+"""
+
 TEAM_ALIASES = {
     "okc": "Oklahoma City Thunder",
     "gsw": "Golden State Warriors",

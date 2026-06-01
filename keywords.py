@@ -259,6 +259,21 @@ MONTH_KEYWORDS = {
 }
 
 
+MONTH_LABELS = {
+    0: None,
+    1: "October",
+    2: "November",
+    3: "December",
+    4: "January",
+    5: "February",
+    6: "March",
+    7: "April",
+    8: "May",
+    9: "June",
+    10: "July",
+}
+
+
 PERIOD_KEYWORDS = {
     "q1": 1,
     "1q": 1,
@@ -293,4 +308,16 @@ PERIOD_KEYWORDS = {
     "triple overtime": 7,
     "3ot": 7,
     "third overtime": 7,
+}
+
+
+PERIOD_LABELS = {
+    0: None,
+    1: "1st quarter",
+    2: "2nd quarter",
+    3: "3rd quarter",
+    4: "4th quarter",
+    5: "overtime",
+    6: "2nd overtime",
+    7: "3rd overtime",
 }

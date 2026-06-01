@@ -1,9 +1,12 @@
+"""Normalize NBA video responses into DataFrames and apply local filters."""
+
 from urllib.parse import urlencode
 
 import pandas as pd
 
 
 def build_event_link(row):
+    """Build the stable NBA stats event page link for a play."""
     game_id = str(row["Game_ID"])
     season_start = 2000 + int(game_id[3:5])
     params = {
@@ -28,6 +31,8 @@ def process_videos(video_details):
     if not playlist:
         return pd.DataFrame()
 
+    # NBA returns compact field names in playlist rows. Rename once here so
+    # downstream search/UI code can use readable column names.
     df = pd.DataFrame(playlist)
     df["Video_URL"] = video_urls
     df["Game_Date"] = pd.to_datetime(
@@ -64,6 +69,9 @@ def process_videos(video_details):
 
     home_change = formatted["Home_Points_After"] - formatted["Home_Points_Before"]
     visitor_change = formatted["Visitor_Points_After"] - formatted["Visitor_Points_Before"]
+
+    # Point_Change powers local miss filtering: made shots change the score,
+    # missed field-goal attempts do not.
     formatted["Point_Change"] = pd.concat([home_change, visitor_change], axis=1).max(axis=1)
     formatted["Score_Diff"] = (formatted["Home_Points_Before"] - formatted["Visitor_Points_Before"]).abs()
     formatted["Score_Diff_After"] = (formatted["Home_Points_After"] - formatted["Visitor_Points_After"]).abs()
@@ -99,6 +107,7 @@ def process_videos(video_details):
 
 
 def filter_by_shot_specifiers(results, shot_specifiers):
+    """Require every requested shot descriptor to appear in the play text."""
     if results.empty or not shot_specifiers:
         return results
 

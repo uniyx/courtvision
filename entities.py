@@ -1,3 +1,5 @@
+"""Entity lookup and fuzzy matching for NBA players and teams."""
+
 from functools import lru_cache
 
 import spacy
@@ -20,6 +22,9 @@ def get_player_lookup():
     for player in players.get_active_players():
         player_lookup[normalize_name(player["full_name"])] = player
 
+    # Aliases only become active when their target is present in the current
+    # active-player list. That keeps retired or future-only aliases from
+    # resolving to stale IDs.
     full_name_lookup = {normalize_name(player["full_name"]): player for player in player_lookup.values()}
     for alias, full_name in PLAYER_ALIASES.items():
         normalized_full_name = normalize_name(full_name)
@@ -50,6 +55,8 @@ def get_team_lookup():
         if city_counts[city_key] == 1:
             team_lookup[city_key] = team
 
+    # Team slang is intentionally explicit; nba_api covers official names,
+    # nicknames, abbreviations, and unambiguous cities.
     for alias, full_name in TEAM_ALIASES.items():
         if full_name in full_name_lookup:
             team_lookup[normalize_name(alias)] = full_name_lookup[full_name]
@@ -83,6 +90,10 @@ def build_player_matcher(nlp=None):
         pattern_texts.add(player["full_name"])
         pattern_texts.add(normalize_name(player["full_name"]))
     pattern_texts.update(player_lookup.keys())
+
+    # PhraseMatcher gives deterministic exact matching before fuzzy matching
+    # is considered. This avoids guessing when the query already has a clean
+    # player/entity phrase.
     patterns = [nlp.make_doc(pattern_text) for pattern_text in pattern_texts]
     matcher.add("PLAYER", patterns)
     return matcher, player_lookup
@@ -114,6 +125,7 @@ def is_searchable_span(span, ignored_tokens):
 
 
 def candidate_spans(doc, ignored_tokens=None, max_tokens=3):
+    """Generate short query spans that are plausible entity candidates."""
     ignored_tokens = ignored_tokens or set()
     spans = []
     for start in range(len(doc)):
@@ -125,6 +137,7 @@ def candidate_spans(doc, ignored_tokens=None, max_tokens=3):
 
 
 def best_fuzzy_choice(text, choices, threshold):
+    """Return the best RapidFuzz choice, unless the best match is too ambiguous."""
     match = process.extractOne(
         normalize_name(text),
         choices,
@@ -135,6 +148,10 @@ def best_fuzzy_choice(text, choices, threshold):
         return None
 
     value, score, index = match
+
+    # If the next-best result is effectively tied, do not guess. This is
+    # important for short names and abbreviations where false positives are
+    # easy to create.
     tied_matches = process.extract(
         normalize_name(text),
         choices,
@@ -153,6 +170,7 @@ def overlaps_blocked_range(span, blocked_ranges):
 
 
 def resolve_entity_from_spans(doc, lookup, threshold, ignored_tokens=None, blocked_ranges=None):
+    """Resolve an entity by trying exact span lookup first, then fuzzy fallback."""
     blocked_ranges = blocked_ranges or []
     choices = list(lookup.keys())
     spans = candidate_spans(doc, ignored_tokens=ignored_tokens)
@@ -179,6 +197,7 @@ def format_player_options(matches):
 
 
 def resolve_player(player_name):
+    """Resolve a direct player input into an active-player dict."""
     normalized = normalize_name(player_name)
     player_lookup = get_player_lookup()
 
