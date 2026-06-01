@@ -256,7 +256,6 @@ SEASON_TYPE_KEYWORDS = {
     "playoffs": "Playoffs",
     "postseason": "Playoffs",
     "regular": "Regular Season",
-    "season": "Regular Season",
     "regular season": "Regular Season",
 }
 

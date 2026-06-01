@@ -49,6 +49,40 @@ def build_event_link(row):
     return f"https://www.nba.com/stats/events?{urlencode(params)}"
 
 
+def build_display_description(description, player_name, keyword_params):
+    """Make NBA block rows read from the searched player's perspective."""
+    if not isinstance(description, str):
+        return description
+
+    if not keyword_params.get("miss_filter"):
+        return description
+
+    block_marker = " BLOCK"
+    if block_marker in description and not description.upper().startswith("MISS "):
+        player_label = player_name.split()[-1]
+        return f"MISS {player_label} - {description}"
+
+    return description
+
+
+def add_search_context(results, player_name, keyword_params, season_type=None):
+    """Attach user-facing context that clarifies why a row matched the query."""
+    if results.empty:
+        for column in ["Display_Description", "Original_Description", "Searched_Player", "Season_Type"]:
+            if column not in results.columns:
+                results[column] = pd.Series(dtype="object")
+        return results
+
+    contextualized = results.copy()
+    contextualized["Original_Description"] = contextualized["Description"]
+    contextualized["Searched_Player"] = player_name
+    contextualized["Season_Type"] = season_type
+    contextualized["Display_Description"] = contextualized["Description"].apply(
+        lambda description: build_display_description(description, player_name, keyword_params)
+    )
+    return contextualized
+
+
 def process_videos(video_details):
     """Normalize the raw NBA playlist and video metadata into a DataFrame."""
     result_sets = video_details["resultSets"]

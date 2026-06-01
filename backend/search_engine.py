@@ -9,13 +9,14 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from backend.formatters import apply_keyword_filters, enrich_with_play_by_play, process_videos
+from backend.formatters import add_search_context, apply_keyword_filters, enrich_with_play_by_play, process_videos
 from backend.names.keywords import MONTH_LABELS, PERIOD_LABELS
 from backend.nba_client import build_nba_stats_headers, build_query_params, fetch_play_by_play, fetch_video_details
-from backend.parsing import build_player_matcher, build_team_matcher, extract_query_parts, load_nlp
+from backend.parsing import extract_query_parts, get_default_matchers
 
 
 logger = logging.getLogger(__name__)
+DEFAULT_SEASON_TYPES = ["Regular Season", "Playoffs"]
 
 
 def format_seconds(seconds):
@@ -70,11 +71,15 @@ class SearchEngine:
         self.use_play_by_play = use_play_by_play
         self.play_by_play_cache = {}
 
-        # Matcher setup is the expensive local work. Keep it on the engine
-        # instance so repeated queries do not rebuild spaCy patterns.
-        self.nlp = load_nlp()
-        self.player_matcher, self.player_lookup = build_player_matcher(self.nlp)
-        self.team_matcher, self.team_lookup = build_team_matcher(self.nlp)
+        # Matcher setup is process-cached. Engines for different seasons can
+        # share the same text parser because season only affects API params.
+        (
+            self.nlp,
+            self.player_matcher,
+            self.player_lookup,
+            self.team_matcher,
+            self.team_lookup,
+        ) = get_default_matchers()
 
     def parse(self, query_text):
         return extract_query_parts(
@@ -87,7 +92,7 @@ class SearchEngine:
         )
 
     def build_query_params(self, query_parts):
-        return build_query_params(
+        params = build_query_params(
             query_parts["player"],
             context_measure=query_parts["keyword_params"]["context_measure"],
             season=self.season,
@@ -96,6 +101,9 @@ class SearchEngine:
             month=query_parts["month"],
             period=query_parts["period"],
         )
+        if query_parts["season_type"] is None:
+            params["season_type_all_star"] = DEFAULT_SEASON_TYPES.copy()
+        return params
 
     def build_interpretation(self, query_parts):
         """Turn parsed fields into a sentence users can verify before trusting results."""
@@ -184,24 +192,39 @@ class SearchEngine:
         query_params = self.build_query_params(query_parts)
         headers = build_nba_stats_headers(rotate_user_agent=self.rotate_user_agent)
         keyword_params = query_parts["keyword_params"]
+        season_types = [query_parts["season_type"]] if query_parts["season_type"] else DEFAULT_SEASON_TYPES
 
         warnings = []
+        raw_frames = []
 
-        try:
-            video_details = fetch_video_details(
-                query_parts["player"],
-                context_measure=query_parts["keyword_params"]["context_measure"],
-                season=self.season,
-                season_type=query_parts["season_type"],
-                opponent_team_id=query_parts["opponent_team_id"],
-                month=query_parts["month"],
-                period=query_parts["period"],
-                headers=headers,
-                retries=self.retries,
-                timeout=self.video_timeout,
+        for season_type in season_types:
+            try:
+                video_details = fetch_video_details(
+                    query_parts["player"],
+                    context_measure=query_parts["keyword_params"]["context_measure"],
+                    season=self.season,
+                    season_type=season_type,
+                    opponent_team_id=query_parts["opponent_team_id"],
+                    month=query_parts["month"],
+                    period=query_parts["period"],
+                    headers=headers,
+                    retries=self.retries,
+                    timeout=self.video_timeout,
+                )
+            except Exception as error:
+                warnings.append(f"Could not fetch {season_type} video details: {type(error).__name__}: {error}")
+                continue
+
+            season_results = process_videos(video_details)
+            season_results = add_search_context(
+                season_results,
+                query_parts["player_name"],
+                keyword_params,
+                season_type=season_type,
             )
-        except Exception as error:
-            warnings.append(f"Could not fetch video details: {type(error).__name__}: {error}")
+            raw_frames.append(season_results)
+
+        if not raw_frames:
             empty_results = pd.DataFrame()
             return SearchResult(
                 query=query_text,
@@ -214,7 +237,9 @@ class SearchEngine:
                 warnings=warnings,
             )
 
-        raw_results = process_videos(video_details)
+        raw_results = pd.concat(raw_frames, ignore_index=True)
+        if "Game_Date" in raw_results.columns and not raw_results.empty:
+            raw_results = raw_results.sort_values("Game_Date", ascending=False)
 
         if keyword_params.get("clutch_seconds") and self.use_play_by_play and not raw_results.empty:
             try:

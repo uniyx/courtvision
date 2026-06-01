@@ -122,7 +122,7 @@ def parse_season_type(query_text):
         if normalized_phrase and normalized_phrase in normalized_query:
             return season_type
 
-    return QUERY_PARAMS["season_type_all_star"]
+    return None
 
 
 def parse_month(query_text):
