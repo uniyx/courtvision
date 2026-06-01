@@ -7,8 +7,8 @@ from nba_api.stats.static import players, teams
 from rapidfuzz import fuzz, process
 from spacy.matcher import PhraseMatcher
 
-from aliases import PLAYER_ALIASES, TEAM_ALIASES
-from utils import normalize_name, tokenize_query
+from backend.names.aliases import PLAYER_ALIASES, TEAM_ALIASES
+from backend.utils import normalize_name, tokenize_query
 
 
 PLAYER_FUZZY_THRESHOLD = 82

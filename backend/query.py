@@ -6,7 +6,7 @@ thin so the backend logic stays in the dedicated modules.
 
 from pathlib import Path
 
-from search_engine import SearchEngine
+from backend.search_engine import SearchEngine
 
 
 TEXT_QUERY = "victor wembanyama dunk playoffs against thunder in may q4"

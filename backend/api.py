@@ -9,8 +9,20 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from search_engine import SearchEngine
+from backend.search_engine import SearchEngine
+
+
 DEFAULT_SEASON = "2025-26"
+SUPPORTED_SEASONS = [
+    "2025-26",
+    "2024-25",
+    "2023-24",
+    "2022-23",
+    "2021-22",
+    "2020-21",
+    "2019-20",
+    "2018-19",
+]
 
 
 class QueryRequest(BaseModel):
@@ -88,6 +100,11 @@ def dataframe_records(frame: pd.DataFrame, offset: int, limit: int) -> list[dict
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/seasons")
+def seasons():
+    return {"default": DEFAULT_SEASON, "seasons": SUPPORTED_SEASONS}
 
 
 @app.post("/query", response_model=QueryResponse)

@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from entities import (
+from backend.entities import (
     PLAYER_FUZZY_THRESHOLD,
     TEAM_FUZZY_THRESHOLD,
     build_player_matcher,
@@ -13,7 +13,7 @@ from entities import (
     resolve_entity_from_spans,
     resolve_player,
 )
-from keywords import (
+from backend.names.keywords import (
     CONTEXT_KEYWORDS,
     MISS_KEYWORDS,
     MONTH_KEYWORDS,
@@ -24,8 +24,8 @@ from keywords import (
     SHOT_KEYWORDS,
     TIME_CONTEXT_KEYWORDS,
 )
-from nba_client import QUERY_PARAMS
-from utils import normalize_name, remove_char_ranges, tokenize_query
+from backend.nba_client import QUERY_PARAMS
+from backend.utils import normalize_name, remove_char_ranges, tokenize_query
 
 
 CONTROL_WORDS = {

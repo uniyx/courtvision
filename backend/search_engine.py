@@ -9,10 +9,10 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from formatters import apply_keyword_filters, enrich_with_play_by_play, process_videos
-from keywords import MONTH_LABELS, PERIOD_LABELS
-from nba_client import build_nba_stats_headers, build_query_params, fetch_play_by_play, fetch_video_details
-from parsing import build_player_matcher, build_team_matcher, extract_query_parts, load_nlp
+from backend.formatters import apply_keyword_filters, enrich_with_play_by_play, process_videos
+from backend.names.keywords import MONTH_LABELS, PERIOD_LABELS
+from backend.nba_client import build_nba_stats_headers, build_query_params, fetch_play_by_play, fetch_video_details
+from backend.parsing import build_player_matcher, build_team_matcher, extract_query_parts, load_nlp
 
 
 logger = logging.getLogger(__name__)
