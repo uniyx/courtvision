@@ -8,10 +8,20 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from formatters import apply_keyword_filters, process_videos
+from formatters import apply_keyword_filters, enrich_with_play_by_play, process_videos
 from keywords import MONTH_LABELS, PERIOD_LABELS
-from nba_client import build_nba_stats_headers, build_query_params, fetch_video_details
+from nba_client import build_nba_stats_headers, build_query_params, fetch_play_by_play, fetch_video_details
 from parsing import build_player_matcher, build_team_matcher, extract_query_parts, load_nlp
+
+
+def format_seconds(seconds):
+    if seconds is None:
+        return None
+    if seconds % 60 == 0:
+        minutes = seconds // 60
+        unit = "minute" if minutes == 1 else "minutes"
+        return f"{minutes} {unit}"
+    return f"{seconds} seconds"
 
 
 @dataclass
@@ -43,6 +53,7 @@ class SearchEngine:
         self.season = season
         self.rotate_user_agent = rotate_user_agent
         self.retries = retries
+        self.play_by_play_cache = {}
 
         # Matcher setup is the expensive local work. Keep it on the engine
         # instance so repeated queries do not rebuild spaCy patterns.
@@ -100,14 +111,37 @@ class SearchEngine:
             pieces.append(f"in {MONTH_LABELS[query_parts['month']]}")
         if PERIOD_LABELS.get(query_parts["period"]):
             pieces.append(f"during the {PERIOD_LABELS[query_parts['period']]}")
+        if keyword_params.get("clutch_seconds"):
+            pieces.append(
+                f"in the final {format_seconds(keyword_params['clutch_seconds'])} "
+                "of the 4th quarter or overtime with the score within 5 points"
+            )
+        if keyword_params.get("score_filter") == "GAME_TYING":
+            pieces.append("that tied the game")
+        if keyword_params.get("score_filter") == "GO_AHEAD":
+            pieces.append("that took the lead")
 
         return " ".join(pieces)
+
+    def fetch_play_by_play_for_results(self, results, headers):
+        """Fetch play-by-play clocks for the games represented in a result set."""
+        play_by_play_by_game = {}
+        for game_id in sorted(results["Game_ID"].dropna().astype(str).unique()):
+            if game_id not in self.play_by_play_cache:
+                self.play_by_play_cache[game_id] = fetch_play_by_play(
+                    game_id,
+                    headers=headers,
+                    retries=self.retries,
+                )
+            play_by_play_by_game[game_id] = self.play_by_play_cache[game_id]
+        return play_by_play_by_game
 
     def search(self, query_text):
         """Run the complete search pipeline and return results plus metadata."""
         query_parts = self.parse(query_text)
         query_params = self.build_query_params(query_parts)
         headers = build_nba_stats_headers(rotate_user_agent=self.rotate_user_agent)
+        keyword_params = query_parts["keyword_params"]
 
         video_details = fetch_video_details(
             query_parts["player"],
@@ -122,12 +156,27 @@ class SearchEngine:
         )
 
         raw_results = process_videos(video_details)
-        results = apply_keyword_filters(raw_results, query_parts["keyword_params"])
         warnings = []
+
+        if keyword_params.get("clutch_seconds") and not raw_results.empty:
+            try:
+                preliminary_params = {**keyword_params, "clutch_seconds": None}
+                preliminary_results = apply_keyword_filters(raw_results, preliminary_params)
+                play_by_play_by_game = self.fetch_play_by_play_for_results(preliminary_results, headers)
+                results_source = enrich_with_play_by_play(preliminary_results, play_by_play_by_game)
+            except Exception as error:
+                results_source = raw_results
+                warnings.append(f"Could not enrich results with play-by-play clock data: {error}")
+        else:
+            results_source = raw_results
+
+        results = apply_keyword_filters(results_source, keyword_params)
 
         # Empty result causes are useful to surface later in notebooks/API/UI.
         if raw_results.empty:
             warnings.append("The NBA API returned no rows for the parsed query parameters.")
+        elif keyword_params.get("clutch_seconds") and "Seconds_Remaining" not in results_source.columns:
+            warnings.append("Clutch filtering needs play-by-play clock data, but no clock data was available.")
         elif results.empty:
             warnings.append("Rows were returned, but local keyword filters removed every row.")
 

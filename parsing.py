@@ -19,8 +19,10 @@ from keywords import (
     MONTH_KEYWORDS,
     PERIOD_KEYWORDS,
     PHRASE_KEYWORDS,
+    SCORE_CONTEXT_KEYWORDS,
     SEASON_TYPE_KEYWORDS,
     SHOT_KEYWORDS,
+    TIME_CONTEXT_KEYWORDS,
 )
 from nba_client import QUERY_PARAMS
 from utils import normalize_name, remove_char_ranges, tokenize_query
@@ -50,7 +52,9 @@ def sorted_keyword_items(keyword_map):
 
 
 SORTED_PHRASE_KEYWORDS = sorted_keyword_items(PHRASE_KEYWORDS)
+SORTED_SCORE_CONTEXT_KEYWORDS = sorted_keyword_items(SCORE_CONTEXT_KEYWORDS)
 SORTED_SEASON_TYPE_KEYWORDS = sorted_keyword_items(SEASON_TYPE_KEYWORDS)
+SORTED_TIME_CONTEXT_KEYWORDS = sorted_keyword_items(TIME_CONTEXT_KEYWORDS)
 SORTED_PERIOD_KEYWORDS = sorted_keyword_items(PERIOD_KEYWORDS)
 
 
@@ -66,6 +70,8 @@ def parse_keywords(query_text):
     context_measure = "PTS"
     shot_specifiers = set()
     miss_filter = False
+    clutch_seconds = None
+    score_filter = None
 
     # Phrase keywords can imply multiple local filters, such as
     # "step back three" -> {"STEP BACK", "3PT"}.
@@ -73,6 +79,18 @@ def parse_keywords(query_text):
         normalized_phrase = " ".join(tokenize_query(phrase))
         if normalized_phrase and normalized_phrase in normalized_query:
             add_shot_specifiers(shot_specifiers, specifier)
+
+    for phrase, seconds in SORTED_TIME_CONTEXT_KEYWORDS:
+        normalized_phrase = " ".join(tokenize_query(phrase))
+        if normalized_phrase and normalized_phrase in normalized_query:
+            clutch_seconds = seconds
+            break
+
+    for phrase, score_context in SORTED_SCORE_CONTEXT_KEYWORDS:
+        normalized_phrase = " ".join(tokenize_query(phrase))
+        if normalized_phrase and normalized_phrase in normalized_query:
+            score_filter = score_context
+            break
 
     for token in tokens:
         if token in CONTEXT_KEYWORDS:
@@ -89,6 +107,8 @@ def parse_keywords(query_text):
         "context_measure": context_measure,
         "shot_specifiers": shot_specifiers,
         "miss_filter": miss_filter,
+        "clutch_seconds": clutch_seconds,
+        "score_filter": score_filter,
     }
 
 
@@ -142,8 +162,10 @@ def control_word_tokens():
 def ignored_entity_tokens():
     """Vocabulary that should not become a player/team fuzzy candidate."""
     tokens = CONTROL_WORDS | control_word_tokens()
-    for keyword_map in (CONTEXT_KEYWORDS, SHOT_KEYWORDS):
+    for keyword_map in (CONTEXT_KEYWORDS, SHOT_KEYWORDS, TIME_CONTEXT_KEYWORDS, SCORE_CONTEXT_KEYWORDS):
         tokens.update(keyword_map.keys())
+        for phrase in keyword_map.keys():
+            tokens.update(tokenize_query(phrase))
     tokens.update(MISS_KEYWORDS)
     return tokens
 

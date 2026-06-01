@@ -1,5 +1,6 @@
 """Normalize NBA video responses into DataFrames and apply local filters."""
 
+from re import fullmatch
 from urllib.parse import urlencode
 
 import pandas as pd
@@ -69,12 +70,31 @@ def process_videos(video_details):
 
     home_change = formatted["Home_Points_After"] - formatted["Home_Points_Before"]
     visitor_change = formatted["Visitor_Points_After"] - formatted["Visitor_Points_Before"]
+    formatted["Home_Score_Diff_Before"] = formatted["Home_Points_Before"] - formatted["Visitor_Points_Before"]
+    formatted["Home_Score_Diff_After"] = formatted["Home_Points_After"] - formatted["Visitor_Points_After"]
 
     # Point_Change powers local miss filtering: made shots change the score,
     # missed field-goal attempts do not.
     formatted["Point_Change"] = pd.concat([home_change, visitor_change], axis=1).max(axis=1)
     formatted["Score_Diff"] = (formatted["Home_Points_Before"] - formatted["Visitor_Points_Before"]).abs()
     formatted["Score_Diff_After"] = (formatted["Home_Points_After"] - formatted["Visitor_Points_After"]).abs()
+    formatted["Scoring_Side"] = "NONE"
+    formatted.loc[home_change > visitor_change, "Scoring_Side"] = "HOME"
+    formatted.loc[visitor_change > home_change, "Scoring_Side"] = "VISITOR"
+    formatted["Scoring_Margin_Before"] = 0
+    formatted["Scoring_Margin_After"] = 0
+    home_scored = formatted["Scoring_Side"] == "HOME"
+    visitor_scored = formatted["Scoring_Side"] == "VISITOR"
+    formatted.loc[home_scored, "Scoring_Margin_Before"] = formatted.loc[home_scored, "Home_Score_Diff_Before"]
+    formatted.loc[home_scored, "Scoring_Margin_After"] = formatted.loc[home_scored, "Home_Score_Diff_After"]
+    formatted.loc[visitor_scored, "Scoring_Margin_Before"] = -formatted.loc[visitor_scored, "Home_Score_Diff_Before"]
+    formatted.loc[visitor_scored, "Scoring_Margin_After"] = -formatted.loc[visitor_scored, "Home_Score_Diff_After"]
+    formatted["Is_Game_Tying"] = formatted["Score_Diff_After"] == 0
+    formatted["Is_Go_Ahead"] = (
+        formatted["Point_Change"].gt(0)
+        & formatted["Scoring_Margin_Before"].le(0)
+        & formatted["Scoring_Margin_After"].gt(0)
+    )
     formatted["Video_Link"] = formatted["Video_URL"].apply(
         lambda value: value.get("lurl") if isinstance(value, dict) else None
     )
@@ -96,14 +116,73 @@ def process_videos(video_details):
         "Home_Points_After",
         "Visitor_Points_Before",
         "Visitor_Points_After",
+        "Home_Score_Diff_Before",
+        "Home_Score_Diff_After",
         "Point_Change",
         "Score_Diff",
         "Score_Diff_After",
+        "Scoring_Side",
+        "Scoring_Margin_Before",
+        "Scoring_Margin_After",
+        "Is_Game_Tying",
+        "Is_Go_Ahead",
         "Video_Link",
         "Thumbnail_Link",
         "Event_Link",
     ]
     return formatted[columns].sort_values("Game_Date", ascending=False)
+
+
+def parse_clock_seconds(clock):
+    """Parse PlayByPlayV3 ISO-ish period clocks such as PT03M47.00S."""
+    if not isinstance(clock, str):
+        return None
+
+    match = fullmatch(r"PT(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?", clock)
+    if not match:
+        return None
+
+    minutes = int(match.group(1) or 0)
+    seconds = float(match.group(2) or 0)
+    return int(minutes * 60 + seconds)
+
+
+def extract_play_by_play_clock(play_by_play):
+    """Return event clock columns needed to enrich VideoDetailsAsset rows."""
+    if play_by_play.empty:
+        return pd.DataFrame(columns=["Game_ID", "Event_Index", "Clock", "Seconds_Remaining"])
+
+    clock_data = play_by_play[["gameId", "actionNumber", "clock"]].copy()
+    clock_data = clock_data.rename(
+        columns={
+            "gameId": "Game_ID",
+            "actionNumber": "Event_Index",
+            "clock": "Clock",
+        }
+    )
+    clock_data["Game_ID"] = clock_data["Game_ID"].astype(str)
+    clock_data["Event_Index"] = pd.to_numeric(clock_data["Event_Index"], errors="coerce").astype("Int64")
+    clock_data["Seconds_Remaining"] = clock_data["Clock"].apply(parse_clock_seconds)
+    return clock_data.dropna(subset=["Event_Index"]).drop_duplicates(["Game_ID", "Event_Index"])
+
+
+def enrich_with_play_by_play(results, play_by_play_by_game):
+    """Attach period clock data to video rows using Game_ID and Event_Index."""
+    if results.empty or not play_by_play_by_game:
+        return results
+
+    clock_frames = [
+        extract_play_by_play_clock(play_by_play)
+        for play_by_play in play_by_play_by_game.values()
+    ]
+    clock_data = pd.concat(clock_frames, ignore_index=True) if clock_frames else pd.DataFrame()
+    if clock_data.empty:
+        return results
+
+    enriched = results.copy()
+    enriched["Game_ID"] = enriched["Game_ID"].astype(str)
+    enriched["Event_Index"] = pd.to_numeric(enriched["Event_Index"], errors="coerce").astype("Int64")
+    return enriched.merge(clock_data, on=["Game_ID", "Event_Index"], how="left")
 
 
 def filter_by_shot_specifiers(results, shot_specifiers):
@@ -120,9 +199,36 @@ def filter_by_shot_specifiers(results, shot_specifiers):
     return results[mask].copy()
 
 
+def filter_by_score_context(results, score_filter):
+    if results.empty or not score_filter:
+        return results
+    if score_filter == "GAME_TYING":
+        return results[results["Is_Game_Tying"]].copy()
+    if score_filter == "GO_AHEAD":
+        return results[results["Is_Go_Ahead"]].copy()
+    return results
+
+
+def filter_by_clutch(results, clutch_seconds):
+    if results.empty or clutch_seconds is None:
+        return results
+    if "Seconds_Remaining" not in results.columns:
+        return results.iloc[0:0].copy()
+
+    clutch_mask = (
+        results["Period"].ge(4)
+        & results["Seconds_Remaining"].notna()
+        & results["Seconds_Remaining"].le(clutch_seconds)
+        & results["Score_Diff"].le(5)
+    )
+    return results[clutch_mask].copy()
+
+
 def apply_keyword_filters(results, keyword_params):
     """Apply local filters that are easier to handle after the NBA response."""
     filtered = filter_by_shot_specifiers(results, keyword_params["shot_specifiers"])
     if keyword_params["miss_filter"]:
         filtered = filtered[filtered["Point_Change"] == 0].copy()
+    filtered = filter_by_score_context(filtered, keyword_params.get("score_filter"))
+    filtered = filter_by_clutch(filtered, keyword_params.get("clutch_seconds"))
     return filtered

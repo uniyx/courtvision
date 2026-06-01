@@ -8,6 +8,7 @@ retry behavior.
 from time import sleep
 
 from fake_useragent import UserAgent
+from nba_api.stats.endpoints import playbyplayv3
 from nba_api.stats.endpoints import videodetailsasset
 
 
@@ -137,3 +138,24 @@ def fetch_video_details(
             sleep(1 + attempt)
 
     raise RuntimeError(f"NBA API request failed for {player['full_name']} ({context_measure}).") from last_error
+
+
+def fetch_play_by_play(game_id, headers=None, rotate_user_agent=False, retries=2):
+    """Fetch PlayByPlayV3 rows for one game so video rows can be enriched with clock data."""
+    last_error = None
+
+    for attempt in range(retries + 1):
+        try:
+            response = playbyplayv3.PlayByPlayV3(
+                game_id=game_id,
+                headers=headers or build_nba_stats_headers(rotate_user_agent=rotate_user_agent),
+                timeout=30,
+            )
+            return response.get_data_frames()[0]
+        except Exception as error:
+            last_error = error
+            if attempt == retries:
+                break
+            sleep(1 + attempt)
+
+    raise RuntimeError(f"NBA play-by-play request failed for game {game_id}.") from last_error
