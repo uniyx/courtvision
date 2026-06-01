@@ -12,14 +12,75 @@ const apiStatus = document.querySelector("#apiStatus");
 const apiStatusDot = document.querySelector("#apiStatusDot");
 const interpretationText = document.querySelector("#interpretationText");
 const warningBox = document.querySelector("#warningBox");
+const themeButton = document.querySelector("#themeButton");
+const vocabularyButton = document.querySelector("#vocabularyButton");
+const vocabularyModal = document.querySelector("#vocabularyModal");
+const vocabularyContent = document.querySelector("#vocabularyContent");
+const vocabularyIntro = document.querySelector("#vocabularyIntro");
+const closeVocabularyButton = document.querySelector("#closeVocabularyButton");
 
 let currentResults = [];
 let selectedIndex = null;
+let loadingAnimationId = null;
+let vocabularyCache = null;
+
+const TEAM_IDS_BY_ABBREVIATION = {
+  ATL: 1610612737,
+  BOS: 1610612738,
+  BKN: 1610612751,
+  CHA: 1610612766,
+  CHI: 1610612741,
+  CLE: 1610612739,
+  DAL: 1610612742,
+  DEN: 1610612743,
+  DET: 1610612765,
+  GSW: 1610612744,
+  HOU: 1610612745,
+  IND: 1610612754,
+  LAC: 1610612746,
+  LAL: 1610612747,
+  MEM: 1610612763,
+  MIA: 1610612748,
+  MIL: 1610612749,
+  MIN: 1610612750,
+  NOP: 1610612740,
+  NYK: 1610612752,
+  OKC: 1610612760,
+  ORL: 1610612753,
+  PHI: 1610612755,
+  PHX: 1610612756,
+  PHO: 1610612756,
+  POR: 1610612757,
+  SAC: 1610612758,
+  SAS: 1610612759,
+  TOR: 1610612761,
+  UTA: 1610612762,
+  WAS: 1610612764
+};
 
 function setApiStatus(label, tone) {
   apiStatus.textContent = label;
   apiStatusDot.className = "h-2.5 w-2.5 rounded-full";
   apiStatusDot.classList.add(tone === "ok" ? "bg-mint" : tone === "bad" ? "bg-red-500" : "bg-zinc-300");
+}
+
+function setTheme(theme) {
+  const isDark = theme === "dark";
+  document.documentElement.classList.toggle("dark", isDark);
+  themeButton.textContent = isDark ? "☀️" : "🌙";
+  themeButton.setAttribute("aria-label", isDark ? "Switch to light mode" : "Switch to dark mode");
+  themeButton.setAttribute("title", isDark ? "Light mode" : "Dark mode");
+  localStorage.setItem("courtvision-theme", theme);
+}
+
+function initializeTheme() {
+  const savedTheme = localStorage.getItem("courtvision-theme");
+  const prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+  setTheme(savedTheme || (prefersDark ? "dark" : "light"));
+}
+
+function toggleTheme() {
+  setTheme(document.documentElement.classList.contains("dark") ? "light" : "dark");
 }
 
 function getApiBase() {
@@ -28,6 +89,32 @@ function getApiBase() {
 
 function formatScore(row) {
   return `${row.Visitor_Team} ${row.Visitor_Points_After} @ ${row.Home_Team} ${row.Home_Points_After}`;
+}
+
+function teamLogoUrl(teamAbbreviation) {
+  const teamId = TEAM_IDS_BY_ABBREVIATION[safeText(teamAbbreviation).toUpperCase()];
+  return teamId ? `https://cdn.nba.com/logos/nba/${teamId}/primary/L/logo.svg` : null;
+}
+
+function renderTeamLogo(teamAbbreviation, className = "h-5 w-5") {
+  const logoUrl = teamLogoUrl(teamAbbreviation);
+  if (!logoUrl) {
+    return "";
+  }
+
+  return `<img class="${className} shrink-0 object-contain" src="${logoUrl}" alt="${escapeHtml(teamAbbreviation)} logo" loading="lazy" onerror="this.style.display='none'" />`;
+}
+
+function renderScore(row) {
+  return `
+    <span class="inline-flex min-w-0 items-center gap-1.5">
+      ${renderTeamLogo(row.Visitor_Team)}
+      <span>${escapeHtml(row.Visitor_Team)} ${escapeHtml(row.Visitor_Points_After)}</span>
+      <span class="text-zinc-400">@</span>
+      ${renderTeamLogo(row.Home_Team)}
+      <span>${escapeHtml(row.Home_Team)} ${escapeHtml(row.Home_Points_After)}</span>
+    </span>
+  `;
 }
 
 function safeText(value) {
@@ -65,10 +152,6 @@ function formatGameDate(value) {
   }).format(date);
 }
 
-function formatPlayMeta(row) {
-  return `${formatGameDate(row.Game_Date)} - ${formatScore(row)}`;
-}
-
 function formatLatency(milliseconds) {
   return milliseconds >= 1000 ? `${(milliseconds / 1000).toFixed(1)}s` : `${milliseconds}ms`;
 }
@@ -95,13 +178,17 @@ function renderResults(rows, query, season) {
   rows.forEach((row, index) => {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "block w-full px-4 py-3 text-left transition hover:bg-zinc-50 focus:bg-zinc-50 focus:outline-none";
+    button.className = "block w-full px-4 py-3 text-left transition hover:bg-zinc-50 focus:bg-zinc-50 focus:outline-none dark:hover:bg-zinc-800 dark:focus:bg-zinc-800";
     button.dataset.resultIndex = String(index);
     button.innerHTML = `
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
           <p class="truncate text-sm font-medium">${escapeHtml(playDescription(row))}</p>
-          <p class="mt-1 text-xs text-zinc-500">${escapeHtml(formatPlayMeta(row))}</p>
+          <p class="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-zinc-500">
+            <span>${escapeHtml(formatGameDate(row.Game_Date))}</span>
+            <span class="text-zinc-300">-</span>
+            ${renderScore(row)}
+          </p>
         </div>
         <span class="shrink-0 rounded border border-line px-2 py-1 text-xs text-zinc-600">Q${safeText(row.Period)}</span>
       </div>
@@ -138,11 +225,71 @@ function renderWarnings(warnings) {
   warningBox.innerHTML = visibleWarnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("");
 }
 
+function titleizeKey(key) {
+  return key
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function entryPreview(values, limit = 18) {
+  if (Array.isArray(values)) {
+    return values.slice(0, limit).map((value) => `<code class="rounded bg-zinc-100 px-1.5 py-0.5 text-xs dark:bg-zinc-800">${escapeHtml(value)}</code>`).join(" ");
+  }
+
+  return Object.entries(values)
+    .slice(0, limit)
+    .map(([key, value]) => `<code class="rounded bg-zinc-100 px-1.5 py-0.5 text-xs dark:bg-zinc-800">${escapeHtml(key)} -> ${escapeHtml(value)}</code>`)
+    .join(" ");
+}
+
+function renderVocabulary(payload) {
+  vocabularyIntro.textContent = payload.description || "Loaded from backend/names/*.py";
+  vocabularyContent.innerHTML = Object.entries(payload.groups || {})
+    .map(([groupName, values]) => {
+      const count = payload.counts?.[groupName] ?? (Array.isArray(values) ? values.length : Object.keys(values).length);
+      return `
+        <section class="border-b border-line py-4 last:border-b-0 dark:border-zinc-800">
+          <div class="mb-2 flex items-center justify-between gap-3">
+            <h3 class="font-semibold">${escapeHtml(titleizeKey(groupName))}</h3>
+            <span class="text-xs text-zinc-500 dark:text-zinc-400">${escapeHtml(count)} entries</span>
+          </div>
+          <div class="flex flex-wrap gap-1.5 leading-7">${entryPreview(values)}</div>
+        </section>
+      `;
+    })
+    .join("");
+}
+
+async function openVocabulary() {
+  vocabularyModal.classList.remove("hidden");
+  vocabularyContent.innerHTML = `<p class="text-zinc-500 dark:text-zinc-400">Loading vocabulary...</p>`;
+
+  try {
+    if (!vocabularyCache) {
+      const response = await fetch(`${getApiBase()}/vocabulary`);
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.detail || `Vocabulary request failed with status ${response.status}`);
+      }
+      vocabularyCache = payload;
+    }
+    renderVocabulary(vocabularyCache);
+  } catch (error) {
+    vocabularyContent.innerHTML = `<p class="text-red-600 dark:text-red-400">${escapeHtml(error.message)}</p>`;
+  }
+}
+
+function closeVocabulary() {
+  vocabularyModal.classList.add("hidden");
+}
+
 function selectResult(index) {
   selectedIndex = index;
   [...resultsList.querySelectorAll("button[data-result-index]")].forEach((button) => {
     const isSelected = Number(button.dataset.resultIndex) === selectedIndex;
     button.classList.toggle("bg-zinc-100", isSelected);
+    button.classList.toggle("dark:bg-zinc-800", isSelected);
   });
   renderDetail(currentResults[index]);
 }
@@ -155,41 +302,41 @@ function renderDetail(row) {
   detailPane.innerHTML = `
     <div class="space-y-4">
       <div>
-        <p class="text-base font-semibold text-ink">${escapeHtml(playDescription(row))}</p>
+        <p class="text-base font-semibold text-ink dark:text-zinc-100">${escapeHtml(playDescription(row))}</p>
         <p class="mt-1 text-xs text-zinc-500">${escapeHtml(formatGameDate(row.Game_Date))} - Event ${escapeHtml(row.Event_Index)}</p>
         ${
           row.Original_Description && row.Original_Description !== playDescription(row)
-            ? `<p class="mt-2 border-l-2 border-line pl-2 text-xs text-zinc-500">NBA: ${escapeHtml(row.Original_Description)}</p>`
+            ? `<p class="mt-2 border-l-2 border-line pl-2 text-xs text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">NBA: ${escapeHtml(row.Original_Description)}</p>`
             : ""
         }
       </div>
 
-      <dl class="grid grid-cols-2 gap-3 border-y border-line py-3 text-sm">
+      <dl class="grid grid-cols-2 gap-3 border-y border-line py-3 text-sm dark:border-zinc-800">
         <div>
           <dt class="text-xs text-zinc-500">Score</dt>
-          <dd class="mt-1 font-medium text-ink">${escapeHtml(formatScore(row))}</dd>
+          <dd class="mt-1 font-medium text-ink dark:text-zinc-100">${renderScore(row)}</dd>
         </div>
         <div>
           <dt class="text-xs text-zinc-500">Period</dt>
-          <dd class="mt-1 font-medium text-ink">${escapeHtml(row.Period)}</dd>
+          <dd class="mt-1 font-medium text-ink dark:text-zinc-100">${escapeHtml(row.Period)}</dd>
         </div>
         <div>
           <dt class="text-xs text-zinc-500">Season Type</dt>
-          <dd class="mt-1 font-medium text-ink">${escapeHtml(row.Season_Type)}</dd>
+          <dd class="mt-1 font-medium text-ink dark:text-zinc-100">${escapeHtml(row.Season_Type)}</dd>
         </div>
         <div>
           <dt class="text-xs text-zinc-500">Point Change</dt>
-          <dd class="mt-1 font-medium text-ink">${escapeHtml(row.Point_Change)}</dd>
+          <dd class="mt-1 font-medium text-ink dark:text-zinc-100">${escapeHtml(row.Point_Change)}</dd>
         </div>
         <div>
           <dt class="text-xs text-zinc-500">Score Diff</dt>
-          <dd class="mt-1 font-medium text-ink">${escapeHtml(row.Score_Diff)}</dd>
+          <dd class="mt-1 font-medium text-ink dark:text-zinc-100">${escapeHtml(row.Score_Diff)}</dd>
         </div>
       </dl>
 
       <div class="space-y-2">
-        <a class="block border border-ink bg-ink px-3 py-2 text-center text-sm font-medium text-white hover:bg-zinc-700" href="${escapeHtml(eventLink)}" target="_blank" rel="noreferrer">Open NBA Event Page</a>
-        <a class="block border border-line px-3 py-2 text-center text-sm font-medium text-ink hover:border-ink ${hasVideoLink ? "" : "pointer-events-none opacity-50"}" href="${escapeHtml(videoLink)}" target="_blank" rel="noreferrer">Open Direct MP4</a>
+        <a class="block border border-ink bg-ink px-3 py-2 text-center text-sm font-medium text-white hover:bg-zinc-700 dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300" href="${escapeHtml(eventLink)}" target="_blank" rel="noreferrer">Open NBA Event Page</a>
+        <a class="block border border-line px-3 py-2 text-center text-sm font-medium text-ink hover:border-ink dark:border-zinc-700 dark:text-zinc-100 dark:hover:border-zinc-400 ${hasVideoLink ? "" : "pointer-events-none opacity-50"}" href="${escapeHtml(videoLink)}" target="_blank" rel="noreferrer">Open Direct MP4</a>
       </div>
 
       <div>
@@ -205,8 +352,25 @@ function renderDetail(row) {
 }
 
 function setLoading(isLoading) {
+  if (loadingAnimationId) {
+    clearInterval(loadingAnimationId);
+    loadingAnimationId = null;
+  }
+
   searchButton.disabled = isLoading;
-  searchButton.textContent = isLoading ? "Searching..." : "Search";
+  if (!isLoading) {
+    searchButton.textContent = "Search";
+    return;
+  }
+
+  let dotCount = 0;
+  const updateLabel = () => {
+    searchButton.textContent = `Searching${".".repeat(dotCount)}`;
+    dotCount = (dotCount + 1) % 4;
+  };
+
+  updateLabel();
+  loadingAnimationId = setInterval(updateLabel, 350);
 }
 
 async function runSearch(query) {
@@ -320,4 +484,19 @@ async function checkApi() {
 }
 
 apiBaseInput.addEventListener("change", checkApi);
+themeButton.addEventListener("click", toggleTheme);
+vocabularyButton.addEventListener("click", openVocabulary);
+closeVocabularyButton.addEventListener("click", closeVocabulary);
+vocabularyModal.addEventListener("click", (event) => {
+  if (event.target === vocabularyModal) {
+    closeVocabulary();
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !vocabularyModal.classList.contains("hidden")) {
+    closeVocabulary();
+  }
+});
+
+initializeTheme();
 checkApi();

@@ -9,6 +9,18 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from backend.names.aliases import PLAYER_ALIASES, TEAM_ALIASES
+from backend.names.keywords import (
+    CONTEXT_KEYWORDS,
+    MISS_KEYWORDS,
+    MONTH_KEYWORDS,
+    PERIOD_KEYWORDS,
+    PHRASE_KEYWORDS,
+    SCORE_CONTEXT_KEYWORDS,
+    SEASON_TYPE_KEYWORDS,
+    SHOT_KEYWORDS,
+    TIME_CONTEXT_KEYWORDS,
+)
 from backend.search_engine import SearchEngine
 
 
@@ -97,6 +109,10 @@ def dataframe_records(frame: pd.DataFrame, offset: int, limit: int) -> list[dict
     ]
 
 
+def sorted_mapping(mapping):
+    return dict(sorted(mapping.items(), key=lambda item: item[0]))
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -105,6 +121,29 @@ def health():
 @app.get("/seasons")
 def seasons():
     return {"default": DEFAULT_SEASON, "seasons": SUPPORTED_SEASONS}
+
+
+@app.get("/vocabulary")
+def vocabulary():
+    """Expose the live alias and keyword dictionaries used by the parser."""
+    groups = {
+        "player_aliases": sorted_mapping(PLAYER_ALIASES),
+        "team_aliases": sorted_mapping(TEAM_ALIASES),
+        "context_keywords": sorted_mapping(CONTEXT_KEYWORDS),
+        "shot_keywords": sorted_mapping(SHOT_KEYWORDS),
+        "phrase_keywords": sorted_mapping(PHRASE_KEYWORDS),
+        "miss_keywords": sorted(MISS_KEYWORDS),
+        "time_context_keywords": sorted_mapping(TIME_CONTEXT_KEYWORDS),
+        "score_context_keywords": sorted_mapping(SCORE_CONTEXT_KEYWORDS),
+        "season_type_keywords": sorted_mapping(SEASON_TYPE_KEYWORDS),
+        "month_keywords": sorted_mapping(MONTH_KEYWORDS),
+        "period_keywords": sorted_mapping(PERIOD_KEYWORDS),
+    }
+    return {
+        "description": "Aliases and keyword maps are imported directly from backend/names/*.py.",
+        "counts": {name: len(values) for name, values in groups.items()},
+        "groups": groups,
+    }
 
 
 @app.post("/query", response_model=QueryResponse)
