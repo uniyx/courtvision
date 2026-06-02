@@ -40,6 +40,7 @@ PLAYER_ALIASES = {
     "demar": "DeMar DeRozan",
     "donovan": "Donovan Mitchell",
     "donovan mitchel": "Donovan Mitchell",
+    "duren": "Jalen Duren",
     "fox": "De'Aaron Fox",
     "garland": "Darius Garland",
     "hali": "Tyrese Haliburton",

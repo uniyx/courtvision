@@ -1,7 +1,7 @@
 """Normalize NBA video responses into DataFrames and apply local filters."""
 
 import logging
-from re import fullmatch
+from re import escape, fullmatch
 from urllib.parse import urlencode
 
 import pandas as pd
@@ -72,7 +72,7 @@ def build_display_description(description, player_name, keyword_params):
 def add_search_context(results, player_name, keyword_params, season_type=None):
     """Attach user-facing context that clarifies why a row matched the query."""
     if results.empty:
-        for column in ["Display_Description", "Original_Description", "Searched_Player", "Season_Type"]:
+        for column in ["Display_Description", "Original_Description", "Searched_Player", "Recipient_Player", "Season_Type"]:
             if column not in results.columns:
                 results[column] = pd.Series(dtype="object")
         return results
@@ -80,6 +80,7 @@ def add_search_context(results, player_name, keyword_params, season_type=None):
     contextualized = results.copy()
     contextualized["Original_Description"] = contextualized["Description"]
     contextualized["Searched_Player"] = player_name
+    contextualized["Recipient_Player"] = keyword_params.get("recipient_player_name")
     contextualized["Season_Type"] = season_type
     contextualized["Display_Description"] = contextualized["Description"].apply(
         lambda description: build_display_description(description, player_name, keyword_params)
@@ -274,6 +275,40 @@ def filter_by_clutch(results, clutch_seconds):
     return results[clutch_mask].copy()
 
 
+def player_description_tokens(player):
+    if not player:
+        return []
+
+    return [
+        value
+        for value in {
+            player.get("full_name"),
+            player.get("last_name"),
+        }
+        if value
+    ]
+
+
+def filter_by_recipient_player(results, recipient_player):
+    """Filter assist rows to plays whose description names the recipient."""
+    if results.empty or not recipient_player:
+        return results
+    if "Description" not in results.columns:
+        return results.iloc[0:0].copy()
+
+    tokens = player_description_tokens(recipient_player)
+    if not tokens:
+        return results
+
+    description = results["Description"].fillna("").str.upper()
+    mask = pd.Series(False, index=results.index)
+    for token in tokens:
+        pattern = rf"(?<![A-Z]){escape(token.upper())}(?![A-Z])"
+        mask |= description.str.contains(pattern, regex=True)
+
+    return results[mask].copy()
+
+
 def apply_keyword_filters(results, keyword_params):
     """Apply local filters that are easier to handle after the NBA response."""
     filtered = filter_by_shot_specifiers(results, keyword_params["shot_specifiers"])
@@ -283,4 +318,5 @@ def apply_keyword_filters(results, keyword_params):
         filtered = filtered[filtered["Point_Change"] == 0].copy()
     filtered = filter_by_score_context(filtered, keyword_params.get("score_filter"))
     filtered = filter_by_clutch(filtered, keyword_params.get("clutch_seconds"))
+    filtered = filter_by_recipient_player(filtered, keyword_params.get("recipient_player"))
     return filtered

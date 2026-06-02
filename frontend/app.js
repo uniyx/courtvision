@@ -1,6 +1,7 @@
 const form = document.querySelector("#searchForm");
 const queryInput = document.querySelector("#queryInput");
 const seasonSelect = document.querySelector("#seasonSelect");
+const playByPlayToggle = document.querySelector("#playByPlayToggle");
 const apiBaseInput = document.querySelector("#apiBaseInput");
 const searchButton = document.querySelector("#searchButton");
 const clearButton = document.querySelector("#clearButton");
@@ -23,6 +24,7 @@ let currentResults = [];
 let selectedIndex = null;
 let loadingAnimationId = null;
 let vocabularyCache = null;
+let expandedVocabularyGroups = new Set();
 
 const TEAM_IDS_BY_ABBREVIATION = {
   ATL: 1610612737,
@@ -67,7 +69,7 @@ function setApiStatus(label, tone) {
 function setTheme(theme) {
   const isDark = theme === "dark";
   document.documentElement.classList.toggle("dark", isDark);
-  themeButton.textContent = isDark ? "☀️" : "🌙";
+  themeButton.textContent = isDark ? "\u2600\uFE0F" : "\uD83C\uDF19";
   themeButton.setAttribute("aria-label", isDark ? "Switch to light mode" : "Switch to dark mode");
   themeButton.setAttribute("title", isDark ? "Light mode" : "Dark mode");
   localStorage.setItem("courtvision-theme", theme);
@@ -262,13 +264,14 @@ function titleizeKey(key) {
     .join(" ");
 }
 
-function entryPreview(values, limit = 18) {
+function entryPreview(values, expanded, limit = 18) {
   if (Array.isArray(values)) {
-    return values.slice(0, limit).map((value) => `<code class="rounded bg-zinc-100 px-1.5 py-0.5 text-xs dark:bg-zinc-800">${escapeHtml(value)}</code>`).join(" ");
+    const visibleValues = expanded ? values : values.slice(0, limit);
+    return visibleValues.map((value) => `<code class="rounded bg-zinc-100 px-1.5 py-0.5 text-xs dark:bg-zinc-800">${escapeHtml(value)}</code>`).join(" ");
   }
 
-  return Object.entries(values)
-    .slice(0, limit)
+  const entries = expanded ? Object.entries(values) : Object.entries(values).slice(0, limit);
+  return entries
     .map(([key, value]) => `<code class="rounded bg-zinc-100 px-1.5 py-0.5 text-xs dark:bg-zinc-800">${escapeHtml(key)} -> ${escapeHtml(value)}</code>`)
     .join(" ");
 }
@@ -278,13 +281,19 @@ function renderVocabulary(payload) {
   vocabularyContent.innerHTML = Object.entries(payload.groups || {})
     .map(([groupName, values]) => {
       const count = payload.counts?.[groupName] ?? (Array.isArray(values) ? values.length : Object.keys(values).length);
+      const expanded = expandedVocabularyGroups.has(groupName);
       return `
         <section class="border-b border-line py-4 last:border-b-0 dark:border-zinc-800">
           <div class="mb-2 flex items-center justify-between gap-3">
             <h3 class="font-semibold">${escapeHtml(titleizeKey(groupName))}</h3>
-            <span class="text-xs text-zinc-500 dark:text-zinc-400">${escapeHtml(count)} entries</span>
+            <div class="flex items-center gap-2">
+              <span class="text-xs text-zinc-500 dark:text-zinc-400">${escapeHtml(count)} entries</span>
+              <button class="h-7 w-7 border border-line text-base leading-none hover:border-ink dark:border-zinc-700 dark:hover:border-zinc-400" type="button" data-vocab-group="${escapeHtml(groupName)}" aria-expanded="${expanded}" title="${expanded ? "Collapse" : "Expand"} ${escapeHtml(titleizeKey(groupName))}">
+                ${expanded ? "-" : "+"}
+              </button>
+            </div>
           </div>
-          <div class="flex flex-wrap gap-1.5 leading-7">${entryPreview(values)}</div>
+          <div class="flex flex-wrap gap-1.5 leading-7">${entryPreview(values, expanded)}</div>
         </section>
       `;
     })
@@ -351,6 +360,14 @@ function renderDetail(row) {
           <dt class="text-xs text-zinc-500">Season Type</dt>
           <dd class="mt-1 font-medium text-ink dark:text-zinc-100">${escapeHtml(row.Season_Type)}</dd>
         </div>
+        ${
+          row.Recipient_Player
+            ? `<div>
+                <dt class="text-xs text-zinc-500">Recipient</dt>
+                <dd class="mt-1 font-medium text-ink dark:text-zinc-100">${escapeHtml(row.Recipient_Player)}</dd>
+              </div>`
+            : ""
+        }
         <div>
           <dt class="text-xs text-zinc-500">Point Change</dt>
           <dd class="mt-1 font-medium text-ink dark:text-zinc-100">${escapeHtml(row.Point_Change)}</dd>
@@ -418,7 +435,7 @@ async function runSearch(query) {
         season,
         limit: 25,
         offset: 0,
-        use_play_by_play: false
+        use_play_by_play: playByPlayToggle.checked
       })
     });
 
@@ -509,6 +526,20 @@ apiBaseInput.addEventListener("change", checkApi);
 themeButton.addEventListener("click", toggleTheme);
 vocabularyButton.addEventListener("click", openVocabulary);
 closeVocabularyButton.addEventListener("click", closeVocabulary);
+vocabularyContent.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-vocab-group]");
+  if (!button || !vocabularyContent.contains(button)) {
+    return;
+  }
+
+  const groupName = button.dataset.vocabGroup;
+  if (expandedVocabularyGroups.has(groupName)) {
+    expandedVocabularyGroups.delete(groupName);
+  } else {
+    expandedVocabularyGroups.add(groupName);
+  }
+  renderVocabulary(vocabularyCache);
+});
 vocabularyModal.addEventListener("click", (event) => {
   if (event.target === vocabularyModal) {
     closeVocabulary();

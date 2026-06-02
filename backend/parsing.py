@@ -10,6 +10,7 @@ from backend.entities import (
     candidate_spans as entity_candidate_spans,
     get_default_matchers,
     load_nlp,
+    overlaps_blocked_range,
     resolve_entity_from_spans,
     resolve_player,
 )
@@ -30,10 +31,12 @@ from backend.utils import normalize_name, remove_char_ranges, tokenize_query
 
 CONTROL_WORDS = {
     "against",
+    "for",
     "versus",
     "vs",
     "v",
     "in",
+    "to",
     "during",
     "playoff",
     "playoffs",
@@ -44,6 +47,8 @@ CONTROL_WORDS = {
     "quarters",
     "overtime",
 }
+
+RECIPIENT_MARKER_WORDS = {"to", "for"}
 
 
 def sorted_keyword_items(keyword_map):
@@ -176,6 +181,72 @@ def candidate_spans(doc, max_tokens=3):
     return entity_candidate_spans(doc, ignored_tokens=ignored_entity_tokens(), max_tokens=max_tokens)
 
 
+def longest_match(matches):
+    """Prefer the longest entity phrase, then the earliest span."""
+    return max(matches, key=lambda match: (match[2] - match[1], -match[1]))
+
+
+def range_after_recipient_marker(doc):
+    """Return the text range after assist-recipient markers such as 'to'."""
+    for token in doc:
+        if token.text.lower() in RECIPIENT_MARKER_WORDS:
+            return token.idx + len(token.text), len(doc.text)
+    return None
+
+
+def unique_player_by_name_part(text, player_lookup):
+    normalized = normalize_name(text)
+    matches = {}
+    for player in player_lookup.values():
+        if normalized in {normalize_name(player["first_name"]), normalize_name(player["last_name"])}:
+            matches[player["id"]] = player
+
+    if len(matches) == 1:
+        return next(iter(matches.values()))
+    return None
+
+
+def resolve_recipient_player(doc, player_lookup, blocked_ranges):
+    """Resolve a secondary player mentioned after 'to'/'for' recipient language."""
+    recipient_range = range_after_recipient_marker(doc)
+    if not recipient_range:
+        return None, None
+
+    start, end = recipient_range
+    blocked_ranges = [*blocked_ranges, (0, start)]
+    for span in candidate_spans(doc):
+        if overlaps_blocked_range(span, blocked_ranges):
+            continue
+        player = unique_player_by_name_part(span.text, player_lookup)
+        if player:
+            return player, (span.start_char, span.end_char)
+
+    return resolve_entity_from_spans(
+        doc,
+        player_lookup,
+        PLAYER_FUZZY_THRESHOLD,
+        ignored_tokens=ignored_entity_tokens(),
+        blocked_ranges=blocked_ranges,
+    )
+
+
+def resolve_unmarked_recipient_player(doc, player_lookup, blocked_ranges):
+    """Resolve a secondary player in assist queries without explicit 'to'/'for'."""
+    for span in candidate_spans(doc):
+        if overlaps_blocked_range(span, blocked_ranges):
+            continue
+
+        normalized = normalize_name(span.text)
+        if normalized in player_lookup:
+            return player_lookup[normalized], (span.start_char, span.end_char)
+
+        player = unique_player_by_name_part(span.text, player_lookup)
+        if player:
+            return player, (span.start_char, span.end_char)
+
+    return None, None
+
+
 def remove_control_words(text):
     """Remove non-action connector/filter words before keyword parsing."""
     tokens = [
@@ -203,7 +274,7 @@ def extract_query_parts(query_text, nlp=None, player_matcher=None, player_lookup
     # Exact entity phrases win. Fuzzy matching only runs when spaCy's
     # deterministic PhraseMatcher does not find a player/team span.
     if player_matches:
-        _, start, end = max(player_matches, key=lambda match: match[2] - match[1])
+        _, start, end = longest_match(player_matches)
         player_span = doc[start:end]
         player = player_lookup[normalize_name(player_span.text)]
         remove_ranges = [(player_span.start_char, player_span.end_char)]
@@ -218,10 +289,27 @@ def extract_query_parts(query_text, nlp=None, player_matcher=None, player_lookup
             raise ValueError(f"No player name found in query: '{query_text}'")
         remove_ranges = [player_range]
 
+    recipient_player = None
+    recipient_range = None
+    recipient_player, recipient_range = resolve_recipient_player(doc, player_lookup, remove_ranges)
+    if recipient_player and recipient_player["id"] == player["id"]:
+        recipient_player = None
+        recipient_range = None
+    if not recipient_player:
+        preliminary_keyword_text = remove_control_words(remove_char_ranges(query_text, remove_ranges))
+        preliminary_keyword_params = parse_keywords(preliminary_keyword_text)
+        if preliminary_keyword_params["context_measure"] == "AST":
+            recipient_player, recipient_range = resolve_unmarked_recipient_player(doc, player_lookup, remove_ranges)
+            if recipient_player and recipient_player["id"] == player["id"]:
+                recipient_player = None
+                recipient_range = None
+    if recipient_player:
+        remove_ranges.append(recipient_range)
+
     opponent_team = None
     team_matches = team_matcher(doc)
     if team_matches:
-        team_match = max(team_matches, key=lambda match: match[2] - match[1])
+        team_match = longest_match(team_matches)
         _, start, end = team_match
         team_span = doc[start:end]
         opponent_team = team_lookup[normalize_name(team_span.text)]
@@ -246,14 +334,22 @@ def extract_query_parts(query_text, nlp=None, player_matcher=None, player_lookup
     month = parse_month(query_text)
     period = parse_period(query_text)
 
+    keyword_params = parse_keywords(keyword_text)
+    keyword_params["recipient_player"] = recipient_player
+    keyword_params["recipient_player_name"] = recipient_player["full_name"] if recipient_player else None
+    if recipient_player:
+        keyword_params["context_measure"] = "AST"
+
     return {
         "player": player,
         "player_name": player["full_name"],
+        "recipient_player": recipient_player,
+        "recipient_player_name": recipient_player["full_name"] if recipient_player else None,
         "opponent_team": opponent_team["full_name"] if opponent_team else None,
         "opponent_team_id": opponent_team["id"] if opponent_team else 0,
         "season_type": season_type,
         "month": month,
         "period": period,
         "keyword_text": keyword_text,
-        "keyword_params": parse_keywords(keyword_text),
+        "keyword_params": keyword_params,
     }

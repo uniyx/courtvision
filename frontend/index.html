@@ -32,10 +32,10 @@
         <div class="flex flex-col items-start gap-2 sm:items-end">
           <div class="flex items-center gap-2">
             <button id="vocabularyButton" class="border border-line bg-white px-3 py-1.5 text-base font-medium text-ink transition hover:border-ink dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:border-zinc-400" type="button" aria-label="Open vocabulary dictionary" title="Vocabulary dictionary">
-              📙
+              &#x1F4D9;
             </button>
             <button id="themeButton" class="border border-line bg-white px-3 py-1.5 text-base font-medium text-ink transition hover:border-ink dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:border-zinc-400" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">
-              🌙
+              &#x1F319;
             </button>
           </div>
           <div class="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
@@ -46,7 +46,7 @@
       </header>
 
       <section class="py-5">
-        <form id="searchForm" class="grid gap-3 md:grid-cols-[1fr_150px_auto]">
+        <form id="searchForm" class="grid gap-3 md:grid-cols-[1fr_150px_150px_150px]">
           <label class="block">
             <span class="sr-only">Search query</span>
             <input
@@ -73,9 +73,13 @@
               <option value="2018-19">2018-19</option>
             </select>
           </label>
+          <label class="flex h-12 w-full items-center justify-between gap-3 border border-line bg-white px-3 text-sm text-ink dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100" title="Use PlayByPlayV3 for exact clock filters">
+            <span class="font-medium">PBPV3</span>
+            <input id="playByPlayToggle" class="h-4 w-4 accent-mint" type="checkbox" />
+          </label>
           <button
             id="searchButton"
-            class="h-12 border border-ink bg-ink px-5 text-sm font-medium text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:border-zinc-300 disabled:bg-zinc-300 dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300 dark:disabled:border-zinc-700 dark:disabled:bg-zinc-700 dark:disabled:text-zinc-400"
+            class="h-12 w-full border border-ink bg-ink px-5 text-sm font-medium text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:border-zinc-300 disabled:bg-zinc-300 dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300 dark:disabled:border-zinc-700 dark:disabled:bg-zinc-700 dark:disabled:text-zinc-400"
             type="submit"
           >
             Search
@@ -86,7 +90,7 @@
           <div class="flex flex-wrap gap-2" aria-label="Example searches">
             <button class="example rounded border border-line bg-white px-3 py-1.5 text-sm hover:border-ink dark:border-zinc-700 dark:bg-zinc-900 dark:hover:border-zinc-400" type="button">victor wembanyama dunk playoffs against thunder</button>
             <button class="example rounded border border-line bg-white px-3 py-1.5 text-sm hover:border-ink dark:border-zinc-700 dark:bg-zinc-900 dark:hover:border-zinc-400" type="button">james harden clutch misses</button>
-            <button class="example rounded border border-line bg-white px-3 py-1.5 text-sm hover:border-ink dark:border-zinc-700 dark:bg-zinc-900 dark:hover:border-zinc-400" type="button">cade fadeaways</button>
+            <button class="example rounded border border-line bg-white px-3 py-1.5 text-sm hover:border-ink dark:border-zinc-700 dark:bg-zinc-900 dark:hover:border-zinc-400" type="button">cade assists duren dunk in q4</button>
           </div>
           <label class="flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-400">
             <span>API</span>

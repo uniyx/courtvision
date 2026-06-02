@@ -36,7 +36,6 @@ SUPPORTED_SEASONS = [
     "2018-19",
 ]
 
-
 class QueryRequest(BaseModel):
     """Client-provided search settings."""
 

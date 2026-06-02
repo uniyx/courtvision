@@ -111,7 +111,11 @@ class SearchEngine:
         shot_specifiers = sorted(keyword_params["shot_specifiers"])
         action = " ".join(specifier.lower() for specifier in shot_specifiers)
 
-        if keyword_params["miss_filter"]:
+        if keyword_params.get("recipient_player_name") and keyword_params["context_measure"] == "AST":
+            action = f"assists to {keyword_params['recipient_player_name']}"
+            if shot_specifiers:
+                action = f"{action} on {' '.join(specifier.lower() for specifier in shot_specifiers)}"
+        elif keyword_params["miss_filter"]:
             action = f"{action} misses".strip()
         elif keyword_params["context_measure"] == "PTS":
             action = f"{action} field goals made".strip()
@@ -139,13 +143,18 @@ class SearchEngine:
         if PERIOD_LABELS.get(query_parts["period"]):
             pieces.append(f"during the {PERIOD_LABELS[query_parts['period']]}")
         if keyword_params.get("clutch_seconds"):
+            clutch_period_label = "4th quarter or overtime"
+            if query_parts["period"] == 4:
+                clutch_period_label = "4th quarter"
+            elif query_parts["period"] and query_parts["period"] >= 5:
+                clutch_period_label = PERIOD_LABELS.get(query_parts["period"], "overtime")
             if self.use_play_by_play:
                 pieces.append(
                     f"in the final {format_seconds(keyword_params['clutch_seconds'])} "
-                    "of the 4th quarter or overtime with the score within 5 points"
+                    f"of the {clutch_period_label} with the score within 5 points"
                 )
             else:
-                pieces.append("in clutch situations, approximated as 4th quarter or overtime with the score within 5 points")
+                pieces.append(f"in clutch situations, approximated as {clutch_period_label} with the score within 5 points")
         if keyword_params.get("score_filter") == "GAME_TYING":
             pieces.append("that tied the game")
         if keyword_params.get("score_filter") == "GO_AHEAD":
