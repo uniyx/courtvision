@@ -5,7 +5,7 @@ from math import isfinite
 from time import perf_counter
 
 import pandas as pd
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -149,8 +149,18 @@ def vocabulary():
 @app.post("/query", response_model=QueryResponse)
 def query(request: QueryRequest):
     started_at = perf_counter()
+    if request.season not in SUPPORTED_SEASONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported season '{request.season}'. Supported seasons: {', '.join(SUPPORTED_SEASONS)}",
+        )
+
     engine = get_engine(request.season, request.use_play_by_play)
-    result = engine.search(request.query)
+    try:
+        result = engine.search(request.query)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
     latency_ms = round((perf_counter() - started_at) * 1000)
 
     return QueryResponse(

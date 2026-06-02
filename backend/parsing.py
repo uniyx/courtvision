@@ -63,10 +63,19 @@ def add_shot_specifiers(shot_specifiers, value):
         shot_specifiers.add(specifier)
 
 
+def token_sequence_contains(tokens, phrase):
+    """Return True when phrase tokens appear as a complete token sequence."""
+    phrase_tokens = tokenize_query(phrase)
+    if not phrase_tokens or len(phrase_tokens) > len(tokens):
+        return False
+
+    phrase_length = len(phrase_tokens)
+    return any(tokens[index : index + phrase_length] == phrase_tokens for index in range(len(tokens) - phrase_length + 1))
+
+
 def parse_keywords(query_text):
     """Map basketball words into NBA API context and local filter settings."""
     tokens = tokenize_query(query_text)
-    normalized_query = " ".join(tokens)
     context_measure = "PTS"
     shot_specifiers = set()
     miss_filter = False
@@ -76,19 +85,16 @@ def parse_keywords(query_text):
     # Phrase keywords can imply multiple local filters, such as
     # "step back three" -> {"STEP BACK", "3PT"}.
     for phrase, specifier in SORTED_PHRASE_KEYWORDS:
-        normalized_phrase = " ".join(tokenize_query(phrase))
-        if normalized_phrase and normalized_phrase in normalized_query:
+        if token_sequence_contains(tokens, phrase):
             add_shot_specifiers(shot_specifiers, specifier)
 
     for phrase, seconds in SORTED_TIME_CONTEXT_KEYWORDS:
-        normalized_phrase = " ".join(tokenize_query(phrase))
-        if normalized_phrase and normalized_phrase in normalized_query:
+        if token_sequence_contains(tokens, phrase):
             clutch_seconds = seconds
             break
 
     for phrase, score_context in SORTED_SCORE_CONTEXT_KEYWORDS:
-        normalized_phrase = " ".join(tokenize_query(phrase))
-        if normalized_phrase and normalized_phrase in normalized_query:
+        if token_sequence_contains(tokens, phrase):
             score_filter = score_context
             break
 
@@ -115,11 +121,9 @@ def parse_keywords(query_text):
 def parse_season_type(query_text):
     """Detect NBA season type words such as playoffs or regular season."""
     tokens = tokenize_query(query_text)
-    normalized_query = " ".join(tokens)
 
     for phrase, season_type in SORTED_SEASON_TYPE_KEYWORDS:
-        normalized_phrase = " ".join(tokenize_query(phrase))
-        if normalized_phrase and normalized_phrase in normalized_query:
+        if token_sequence_contains(tokens, phrase):
             return season_type
 
     return None
@@ -139,11 +143,9 @@ def parse_month(query_text):
 def parse_period(query_text):
     """Detect quarter/period keywords for the NBA Stats Period parameter."""
     tokens = tokenize_query(query_text)
-    normalized_query = " ".join(tokens)
 
     for phrase, period in SORTED_PERIOD_KEYWORDS:
-        normalized_phrase = " ".join(tokenize_query(phrase))
-        if normalized_phrase and normalized_phrase in normalized_query:
+        if token_sequence_contains(tokens, phrase):
             return period
 
     return QUERY_PARAMS["period"]

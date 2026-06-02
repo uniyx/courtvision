@@ -156,6 +156,36 @@ function formatLatency(milliseconds) {
   return milliseconds >= 1000 ? `${(milliseconds / 1000).toFixed(1)}s` : `${milliseconds}ms`;
 }
 
+function responseDetail(payload, fallback) {
+  if (Array.isArray(payload?.detail)) {
+    return payload.detail.map((item) => item.msg || item.message || String(item)).join(", ");
+  }
+
+  return payload?.detail || payload?.message || fallback;
+}
+
+async function readJsonResponse(response, label) {
+  const text = await response.text();
+  let payload = {};
+
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch (error) {
+      if (!response.ok) {
+        throw new Error(`${label} failed with status ${response.status}: ${text.slice(0, 200)}`);
+      }
+      throw new Error(`${label} returned invalid JSON.`);
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(responseDetail(payload, `${label} failed with status ${response.status}`));
+  }
+
+  return payload;
+}
+
 function renderResults(rows, query, season) {
   currentResults = rows;
   selectedIndex = null;
@@ -268,10 +298,7 @@ async function openVocabulary() {
   try {
     if (!vocabularyCache) {
       const response = await fetch(`${getApiBase()}/vocabulary`);
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.detail || `Vocabulary request failed with status ${response.status}`);
-      }
+      const payload = await readJsonResponse(response, "Vocabulary request");
       vocabularyCache = payload;
     }
     renderVocabulary(vocabularyCache);
@@ -395,21 +422,16 @@ async function runSearch(query) {
       })
     });
 
-    const payload = await response.json();
-    if (!response.ok) {
-      const detail = Array.isArray(payload.detail)
-        ? payload.detail.map((item) => item.msg).join(", ")
-        : payload.detail || `Request failed with status ${response.status}`;
-      throw new Error(detail);
-    }
+    const payload = await readJsonResponse(response, "Search request");
+    const rows = Array.isArray(payload.results) ? payload.results : [];
 
     const totalElapsedMs = Math.round(performance.now() - startedAt);
     const apiLatencyMs = payload.latency_ms ?? totalElapsedMs;
     setApiStatus(`API ${formatLatency(apiLatencyMs)} / total ${formatLatency(totalElapsedMs)}`, "ok");
     renderInterpretation(payload.interpretation);
     renderWarnings(payload.warnings);
-    renderResults(payload.results || [], payload.query || query, season);
-    resultMeta.textContent = `${payload.results.length} of ${payload.filtered_result_count} filtered plays - ${payload.raw_result_count} raw`;
+    renderResults(rows, payload.query || query, season);
+    resultMeta.textContent = `${rows.length} of ${payload.filtered_result_count ?? rows.length} filtered plays - ${payload.raw_result_count ?? 0} raw`;
   } catch (error) {
     setApiStatus("API error", "bad");
     renderInterpretation(null);
@@ -468,7 +490,7 @@ async function checkApi() {
     }
 
     if (seasonsResponse.ok) {
-      const payload = await seasonsResponse.json();
+      const payload = await readJsonResponse(seasonsResponse, "Seasons request");
       if (Array.isArray(payload.seasons) && payload.seasons.length > 0) {
         seasonSelect.innerHTML = payload.seasons
           .map((season) => `<option value="${escapeHtml(season)}">${escapeHtml(season)}</option>`)

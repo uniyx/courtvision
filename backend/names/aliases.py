@@ -26,6 +26,7 @@ PLAYER_ALIASES = {
     "ad": "Anthony Davis",
     "bam": "Bam Adebayo",
     "book": "Devin Booker",
+    "booker": "Devin Booker",
     "bron": "LeBron James",
     "cade": "Cade Cunningham",
     "cason": "Cason Wallace",

@@ -1,9 +1,13 @@
 """Normalize NBA video responses into DataFrames and apply local filters."""
 
+import logging
 from re import fullmatch
 from urllib.parse import urlencode
 
 import pandas as pd
+
+
+logger = logging.getLogger(__name__)
 
 
 VIDEO_COLUMNS = [
@@ -42,7 +46,7 @@ def build_event_link(row):
     params = {
         "GameEventID": row["Event_Index"],
         "GameID": game_id,
-        "Season": f"{season_start}-{season_start + 1}",
+        "Season": f"{season_start}-{str(season_start + 1)[-2:]}",
         "flag": 1,
         "title": row["Description"],
     }
@@ -87,10 +91,10 @@ def process_videos(video_details):
     """Normalize the raw NBA playlist and video metadata into a DataFrame."""
     result_sets = video_details["resultSets"]
     playlist = result_sets["playlist"]
-    video_urls = result_sets["Meta"]["videoUrls"]
+    video_urls = result_sets.get("Meta", {}).get("videoUrls", [])
 
-    print(f"playlist rows: {len(playlist)}")
-    print(f"video URL rows: {len(video_urls)}")
+    logger.debug("playlist rows: %s", len(playlist))
+    logger.debug("video URL rows: %s", len(video_urls))
 
     if not playlist:
         return pd.DataFrame(columns=VIDEO_COLUMNS)
@@ -98,7 +102,8 @@ def process_videos(video_details):
     # NBA returns compact field names in playlist rows. Rename once here so
     # downstream search/UI code can use readable column names.
     df = pd.DataFrame(playlist)
-    df["Video_URL"] = video_urls
+    video_url_series = pd.Series(video_urls, dtype="object")
+    df["Video_URL"] = video_url_series.reindex(df.index).tolist()
     df["Game_Date"] = pd.to_datetime(
         df["y"].astype(str)
         + "-"
