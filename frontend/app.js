@@ -9,11 +9,17 @@ const resultsList = document.querySelector("#resultsList");
 const emptyState = document.querySelector("#emptyState");
 const resultMeta = document.querySelector("#resultMeta");
 const detailPane = document.querySelector("#detailPane");
+const loadMoreSentinel = document.querySelector("#loadMoreSentinel");
 const apiStatus = document.querySelector("#apiStatus");
 const apiStatusDot = document.querySelector("#apiStatusDot");
 const interpretationText = document.querySelector("#interpretationText");
 const warningBox = document.querySelector("#warningBox");
 const themeButton = document.querySelector("#themeButton");
+const teamsButton = document.querySelector("#teamsButton");
+const teamsModal = document.querySelector("#teamsModal");
+const teamsContent = document.querySelector("#teamsContent");
+const teamsIntro = document.querySelector("#teamsIntro");
+const closeTeamsButton = document.querySelector("#closeTeamsButton");
 const vocabularyButton = document.querySelector("#vocabularyButton");
 const vocabularyModal = document.querySelector("#vocabularyModal");
 const vocabularyContent = document.querySelector("#vocabularyContent");
@@ -23,8 +29,21 @@ const closeVocabularyButton = document.querySelector("#closeVocabularyButton");
 let currentResults = [];
 let selectedIndex = null;
 let loadingAnimationId = null;
+let teamsCacheBySeason = {};
+let teamRostersBySeason = {};
+let rosterLoadingTeamId = null;
+let rosterErrorsBySeason = {};
+let selectedTeamId = null;
 let vocabularyCache = null;
 let expandedVocabularyGroups = new Set();
+let currentSearchId = null;
+let currentQuery = "";
+let currentSeason = "";
+let hasMoreResults = false;
+let isLoadingMore = false;
+
+const PAGE_SIZE = 25;
+let resultObserver = null;
 
 const TEAM_IDS_BY_ABBREVIATION = {
   ATL: 1610612737,
@@ -119,6 +138,23 @@ function renderScore(row) {
   `;
 }
 
+function teamBrowserLogoUrl(team) {
+  return team.logo_url || teamLogoUrl(team.abbreviation);
+}
+
+function formatPercent(value) {
+  if (value === null || value === undefined || value === "") {
+    return "Unknown";
+  }
+
+  const numericValue = Number(value);
+  if (Number.isNaN(numericValue)) {
+    return safeText(value);
+  }
+
+  return numericValue <= 1 ? numericValue.toFixed(3).replace(/^0/, "") : numericValue.toFixed(3);
+}
+
 function safeText(value) {
   return value === null || value === undefined || value === "" ? "Unknown" : String(value);
 }
@@ -188,30 +224,55 @@ async function readJsonResponse(response, label) {
   return payload;
 }
 
-function renderResults(rows, query, season) {
-  currentResults = rows;
-  selectedIndex = null;
-  resultsList.innerHTML = "";
-  clearButton.classList.toggle("hidden", rows.length === 0);
+function updateLoadMoreSentinel() {
+  if (currentResults.length === 0 || !currentSearchId) {
+    loadMoreSentinel.classList.add("hidden");
+    loadMoreSentinel.textContent = "";
+    return;
+  }
 
-  if (rows.length === 0) {
+  loadMoreSentinel.classList.remove("hidden");
+  if (isLoadingMore) {
+    loadMoreSentinel.textContent = "Loading more plays...";
+  } else if (hasMoreResults) {
+    loadMoreSentinel.textContent = "Scroll for more plays";
+  } else {
+    loadMoreSentinel.textContent = "All matching plays loaded";
+  }
+}
+
+function renderResults(rows, query, season, append = false) {
+  const startIndex = append ? currentResults.length : 0;
+  if (append) {
+    currentResults = [...currentResults, ...rows];
+  } else {
+    currentResults = rows;
+    selectedIndex = null;
+    resultsList.innerHTML = "";
+  }
+  clearButton.classList.toggle("hidden", currentResults.length === 0);
+  updateLoadMoreSentinel();
+
+  if (currentResults.length === 0) {
     resultsList.classList.add("hidden");
     emptyState.classList.remove("hidden");
     emptyState.textContent = `No results found for "${query}".`;
     resultMeta.textContent = `0 plays - ${season}`;
     detailPane.innerHTML = "Select a result to inspect links.";
+    updateLoadMoreSentinel();
     return;
   }
 
   emptyState.classList.add("hidden");
   resultsList.classList.remove("hidden");
-  resultMeta.textContent = `${rows.length} loaded play${rows.length === 1 ? "" : "s"} for "${query}" - ${season}`;
+  resultMeta.textContent = `${currentResults.length} loaded play${currentResults.length === 1 ? "" : "s"} for "${query}" - ${season}`;
 
   rows.forEach((row, index) => {
+    const resultIndex = startIndex + index;
     const button = document.createElement("button");
     button.type = "button";
     button.className = "block w-full px-4 py-3 text-left transition hover:bg-zinc-50 focus:bg-zinc-50 focus:outline-none dark:hover:bg-zinc-800 dark:focus:bg-zinc-800";
-    button.dataset.resultIndex = String(index);
+    button.dataset.resultIndex = String(resultIndex);
     button.innerHTML = `
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
@@ -225,13 +286,14 @@ function renderResults(rows, query, season) {
         <span class="shrink-0 rounded border border-line px-2 py-1 text-xs text-zinc-600">Q${safeText(row.Period)}</span>
       </div>
     `;
-    button.addEventListener("click", () => selectResult(index));
+    button.addEventListener("click", () => selectResult(resultIndex));
     resultsList.appendChild(button);
 
-    if (index === 0) {
-      selectResult(index);
+    if (!append && index === 0) {
+      selectResult(resultIndex);
     }
   });
+  updateLoadMoreSentinel();
 }
 
 function renderInterpretation(interpretation) {
@@ -255,6 +317,186 @@ function renderWarnings(warnings) {
 
   warningBox.classList.remove("hidden");
   warningBox.innerHTML = visibleWarnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("");
+}
+
+function teamStat(label, value) {
+  return `
+    <div class="border border-line px-3 py-2 dark:border-zinc-800">
+      <dt class="text-xs text-zinc-500 dark:text-zinc-400">${escapeHtml(label)}</dt>
+      <dd class="mt-1 font-semibold text-ink dark:text-zinc-100">${escapeHtml(value)}</dd>
+    </div>
+  `;
+}
+
+function renderPlayerRow(player) {
+  return `
+    <tr class="border-b border-line last:border-b-0 dark:border-zinc-800">
+      <td class="px-3 py-2 font-medium text-ink dark:text-zinc-100">${escapeHtml(player.name)}</td>
+      <td class="px-3 py-2 text-zinc-500 dark:text-zinc-400">${escapeHtml(player.number || "-")}</td>
+      <td class="px-3 py-2 text-zinc-500 dark:text-zinc-400">${escapeHtml(player.position || "-")}</td>
+      <td class="px-3 py-2 text-zinc-500 dark:text-zinc-400">${escapeHtml(player.height || "-")}</td>
+      <td class="px-3 py-2 text-zinc-500 dark:text-zinc-400">${escapeHtml(player.age || "-")}</td>
+      <td class="px-3 py-2 text-zinc-500 dark:text-zinc-400">${escapeHtml(player.experience || "-")}</td>
+      <td class="px-3 py-2 text-zinc-500 dark:text-zinc-400">${escapeHtml(player.school || "-")}</td>
+    </tr>
+  `;
+}
+
+function renderTeamDetail(team) {
+  const logoUrl = teamBrowserLogoUrl(team);
+  const season = seasonSelect.value;
+  const players = teamRostersBySeason[season]?.[team.id] || [];
+  const rosterError = rosterErrorsBySeason[season]?.[team.id] || "";
+  const isRosterLoading = String(rosterLoadingTeamId) === String(team.id);
+  const rosterMessage = rosterError || (isRosterLoading ? "Loading roster..." : "Roster unavailable.");
+
+  return `
+    <article class="mt-4 border border-line bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-900">
+      <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div class="flex min-w-0 items-center gap-3">
+          ${
+            logoUrl
+              ? `<img class="h-16 w-16 shrink-0 object-contain" src="${escapeHtml(logoUrl)}" alt="${escapeHtml(team.full_name)} logo" loading="lazy" onerror="this.style.display='none'" />`
+              : ""
+          }
+          <div class="min-w-0">
+            <h3 class="text-lg font-semibold text-ink dark:text-zinc-100">${escapeHtml(team.full_name)}</h3>
+            <p class="mt-0.5 text-sm text-zinc-500 dark:text-zinc-400">${escapeHtml(team.conference)} - ${escapeHtml(team.division)}</p>
+          </div>
+        </div>
+        <div class="text-left sm:text-right">
+          <p class="text-2xl font-semibold text-ink dark:text-zinc-100">#${escapeHtml(team.conference_rank)}</p>
+          <p class="text-xs text-zinc-500 dark:text-zinc-400">Conference rank</p>
+        </div>
+      </div>
+
+      <dl class="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        ${teamStat("Record", team.record || `${team.wins}-${team.losses}`)}
+        ${teamStat("Win Pct", formatPercent(team.win_pct))}
+        ${teamStat("Home / Road", `${safeText(team.home)} / ${safeText(team.road)}`)}
+        ${teamStat("Last 10", team.last_10 || "Unknown")}
+        ${teamStat("Conf / Div", `${safeText(team.conference_record)} / ${safeText(team.division_record)}`)}
+        ${teamStat("Points PG", team.points_pg || "Unknown")}
+        ${teamStat("Opp Points PG", team.opp_points_pg || "Unknown")}
+        ${teamStat("Diff PG", team.diff_points_pg || "Unknown")}
+      </dl>
+
+      <div class="mt-4 overflow-x-auto border border-line bg-white dark:border-zinc-800 dark:bg-zinc-950">
+        <table class="min-w-full text-left text-xs">
+          <thead class="border-b border-line text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+            <tr>
+              <th class="px-3 py-2 font-medium">Player</th>
+              <th class="px-3 py-2 font-medium">No.</th>
+              <th class="px-3 py-2 font-medium">Pos</th>
+              <th class="px-3 py-2 font-medium">Ht</th>
+              <th class="px-3 py-2 font-medium">Age</th>
+              <th class="px-3 py-2 font-medium">Exp</th>
+              <th class="px-3 py-2 font-medium">School</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${players.length > 0 ? players.map(renderPlayerRow).join("") : `<tr><td class="px-3 py-3 text-zinc-500 dark:text-zinc-400" colspan="7">${escapeHtml(rosterMessage)}</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </article>
+  `;
+}
+
+function renderConference(conference) {
+  const teams = Array.isArray(conference.teams) ? conference.teams : [];
+  const selectedTeam = teams.find((team) => String(team.id) === String(selectedTeamId));
+
+  return `
+    <section class="border-b border-line py-5 first:pt-0 last:border-b-0 dark:border-zinc-800">
+      <div class="mb-3 flex items-baseline justify-between gap-3">
+        <h3 class="font-semibold">${escapeHtml(conference.name)}</h3>
+        <span class="text-xs text-zinc-500 dark:text-zinc-400">${escapeHtml(teams.length)} teams</span>
+      </div>
+      <div class="grid grid-cols-3 gap-2 sm:grid-cols-5 lg:grid-cols-8 xl:grid-cols-10">
+        ${teams
+          .map((team) => {
+            const logoUrl = teamBrowserLogoUrl(team);
+            const isSelected = String(team.id) === String(selectedTeamId);
+            return `
+              <button class="relative flex aspect-square items-center justify-center border bg-white p-3 transition hover:border-ink focus:outline-none focus:ring-2 focus:ring-ink/20 dark:bg-zinc-900 dark:hover:border-zinc-400 ${
+                isSelected ? "border-ink dark:border-zinc-100" : "border-line dark:border-zinc-800"
+              }" type="button" data-team-id="${escapeHtml(team.id)}" title="#${escapeHtml(team.conference_rank)} ${escapeHtml(team.full_name)}" aria-label="Open ${escapeHtml(team.full_name)}">
+                <span class="absolute left-1 top-1 text-[10px] font-semibold text-zinc-500 dark:text-zinc-400">#${escapeHtml(team.conference_rank)}</span>
+                ${
+                  logoUrl
+                    ? `<img class="h-full max-h-14 w-full object-contain" src="${escapeHtml(logoUrl)}" alt="${escapeHtml(team.full_name)} logo" loading="lazy" onerror="this.style.display='none'" />`
+                    : `<span class="text-sm font-semibold">${escapeHtml(team.abbreviation)}</span>`
+                }
+              </button>
+            `;
+          })
+          .join("")}
+      </div>
+      ${selectedTeam ? renderTeamDetail(selectedTeam) : ""}
+    </section>
+  `;
+}
+
+function renderTeams(payload) {
+  const conferences = Array.isArray(payload.conferences) ? payload.conferences : [];
+  teamsIntro.textContent = `${payload.season || seasonSelect.value} regular-season standings, rosters, and team stats`;
+  teamsContent.innerHTML = `
+    ${
+      Array.isArray(payload.warnings) && payload.warnings.length > 0
+        ? `<div class="mb-4 border-l-2 border-amber-500 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-zinc-900 dark:text-amber-300">${payload.warnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("")}</div>`
+        : ""
+    }
+    ${conferences.map(renderConference).join("")}
+  `;
+}
+
+async function openTeams() {
+  const season = seasonSelect.value;
+  teamsModal.classList.remove("hidden");
+  teamsContent.innerHTML = `<p class="text-zinc-500 dark:text-zinc-400">Loading teams...</p>`;
+  teamsIntro.textContent = `${season} regular-season standings, rosters, and team stats`;
+
+  try {
+    if (!teamsCacheBySeason[season]) {
+      const response = await fetch(`${getApiBase()}/teams?season=${encodeURIComponent(season)}`);
+      teamsCacheBySeason[season] = await readJsonResponse(response, "Teams request");
+    }
+    renderTeams(teamsCacheBySeason[season]);
+  } catch (error) {
+    teamsContent.innerHTML = `<p class="text-red-600 dark:text-red-400">${escapeHtml(error.message)}</p>`;
+  }
+}
+
+async function loadTeamRoster(teamId) {
+  const season = seasonSelect.value;
+  teamRostersBySeason[season] = teamRostersBySeason[season] || {};
+  rosterErrorsBySeason[season] = rosterErrorsBySeason[season] || {};
+
+  if (teamRostersBySeason[season][teamId]) {
+    return;
+  }
+
+  rosterLoadingTeamId = String(teamId);
+  rosterErrorsBySeason[season][teamId] = "";
+  renderTeams(teamsCacheBySeason[season]);
+
+  try {
+    const response = await fetch(`${getApiBase()}/teams/${encodeURIComponent(teamId)}/roster?season=${encodeURIComponent(season)}`);
+    const payload = await readJsonResponse(response, "Roster request");
+    teamRostersBySeason[season][teamId] = Array.isArray(payload.players) ? payload.players : [];
+  } catch (error) {
+    rosterErrorsBySeason[season][teamId] = error.message;
+  } finally {
+    if (String(rosterLoadingTeamId) === String(teamId)) {
+      rosterLoadingTeamId = null;
+    }
+    renderTeams(teamsCacheBySeason[season]);
+  }
+}
+
+function closeTeams() {
+  teamsModal.classList.add("hidden");
 }
 
 function titleizeKey(key) {
@@ -422,6 +664,11 @@ async function runSearch(query) {
   const season = seasonSelect.value;
   const startedAt = performance.now();
   setLoading(true);
+  currentSearchId = null;
+  currentQuery = query;
+  currentSeason = season;
+  hasMoreResults = false;
+  isLoadingMore = false;
   resultMeta.textContent = "Searching...";
   setApiStatus("Querying API", "neutral");
   renderWarnings([]);
@@ -433,7 +680,7 @@ async function runSearch(query) {
       body: JSON.stringify({
         query,
         season,
-        limit: 25,
+        limit: PAGE_SIZE,
         offset: 0,
         use_play_by_play: playByPlayToggle.checked
       })
@@ -441,6 +688,8 @@ async function runSearch(query) {
 
     const payload = await readJsonResponse(response, "Search request");
     const rows = Array.isArray(payload.results) ? payload.results : [];
+    currentSearchId = payload.search_id || null;
+    hasMoreResults = Boolean(payload.has_more);
 
     const totalElapsedMs = Math.round(performance.now() - startedAt);
     const apiLatencyMs = payload.latency_ms ?? totalElapsedMs;
@@ -448,7 +697,8 @@ async function runSearch(query) {
     renderInterpretation(payload.interpretation);
     renderWarnings(payload.warnings);
     renderResults(rows, payload.query || query, season);
-    resultMeta.textContent = `${rows.length} of ${payload.filtered_result_count ?? rows.length} filtered plays - ${payload.raw_result_count ?? 0} raw`;
+    resultMeta.textContent = `${currentResults.length} of ${payload.filtered_result_count ?? currentResults.length} filtered plays - ${payload.raw_result_count ?? 0} raw`;
+    setTimeout(maybeLoadNextPage, 0);
   } catch (error) {
     setApiStatus("API error", "bad");
     renderInterpretation(null);
@@ -461,6 +711,59 @@ async function runSearch(query) {
   } finally {
     setLoading(false);
   }
+}
+
+async function loadNextPage() {
+  if (!currentSearchId || !hasMoreResults || isLoadingMore) {
+    return;
+  }
+
+  isLoadingMore = true;
+  updateLoadMoreSentinel();
+  const apiBase = getApiBase();
+  const offset = currentResults.length;
+  setApiStatus("Loading more", "neutral");
+
+  try {
+    const response = await fetch(`${apiBase}/query/${currentSearchId}?offset=${offset}&limit=${PAGE_SIZE}`);
+    const payload = await readJsonResponse(response, "Results page request");
+    const rows = Array.isArray(payload.results) ? payload.results : [];
+    hasMoreResults = Boolean(payload.has_more);
+    renderResults(rows, payload.query || currentQuery, currentSeason, true);
+    resultMeta.textContent = `${currentResults.length} of ${payload.filtered_result_count ?? currentResults.length} filtered plays - ${payload.raw_result_count ?? 0} raw`;
+    setApiStatus("API connected", "ok");
+    setTimeout(maybeLoadNextPage, 0);
+  } catch (error) {
+    hasMoreResults = false;
+    setApiStatus("API error", "bad");
+    renderWarnings([error.message]);
+  } finally {
+    isLoadingMore = false;
+    updateLoadMoreSentinel();
+  }
+}
+
+function maybeLoadNextPage() {
+  const remainingPixels = document.documentElement.scrollHeight - window.innerHeight - window.scrollY;
+  if (remainingPixels < 400) {
+    loadNextPage();
+  }
+}
+
+function initializeResultObserver() {
+  if (!("IntersectionObserver" in window)) {
+    return;
+  }
+
+  resultObserver = new IntersectionObserver(
+    (entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        loadNextPage();
+      }
+    },
+    { root: null, rootMargin: "600px 0px 600px 0px", threshold: 0 }
+  );
+  resultObserver.observe(loadMoreSentinel);
 }
 
 form.addEventListener("submit", (event) => {
@@ -481,6 +784,11 @@ document.querySelectorAll(".example").forEach((button) => {
 clearButton.addEventListener("click", () => {
   currentResults = [];
   selectedIndex = null;
+  currentSearchId = null;
+  currentQuery = "";
+  currentSeason = "";
+  hasMoreResults = false;
+  isLoadingMore = false;
   resultsList.innerHTML = "";
   resultsList.classList.add("hidden");
   emptyState.classList.remove("hidden");
@@ -489,6 +797,7 @@ clearButton.addEventListener("click", () => {
   detailPane.innerHTML = "Select a result to inspect links.";
   renderInterpretation(null);
   renderWarnings([]);
+  updateLoadMoreSentinel();
   clearButton.classList.add("hidden");
 });
 
@@ -523,7 +832,20 @@ async function checkApi() {
 }
 
 apiBaseInput.addEventListener("change", checkApi);
+window.addEventListener("scroll", maybeLoadNextPage);
 themeButton.addEventListener("click", toggleTheme);
+teamsButton.addEventListener("click", openTeams);
+closeTeamsButton.addEventListener("click", closeTeams);
+teamsContent.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-team-id]");
+  if (!button || !teamsContent.contains(button)) {
+    return;
+  }
+
+  selectedTeamId = String(button.dataset.teamId);
+  renderTeams(teamsCacheBySeason[seasonSelect.value]);
+  await loadTeamRoster(selectedTeamId);
+});
 vocabularyButton.addEventListener("click", openVocabulary);
 closeVocabularyButton.addEventListener("click", closeVocabulary);
 vocabularyContent.addEventListener("click", (event) => {
@@ -540,16 +862,26 @@ vocabularyContent.addEventListener("click", (event) => {
   }
   renderVocabulary(vocabularyCache);
 });
+teamsModal.addEventListener("click", (event) => {
+  if (event.target === teamsModal) {
+    closeTeams();
+  }
+});
 vocabularyModal.addEventListener("click", (event) => {
   if (event.target === vocabularyModal) {
     closeVocabulary();
   }
 });
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !teamsModal.classList.contains("hidden")) {
+    closeTeams();
+  }
+
   if (event.key === "Escape" && !vocabularyModal.classList.contains("hidden")) {
     closeVocabulary();
   }
 });
 
 initializeTheme();
+initializeResultObserver();
 checkApi();

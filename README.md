@@ -49,6 +49,7 @@ It provides:
 - API URL configuration.
 - A vocabulary modal showing the parser's aliases and keywords.
 - Result list and selected-play detail view.
+- Infinite scrolling backed by cached search results.
 
 When a search is submitted, `frontend/app.js` sends:
 
@@ -64,6 +65,8 @@ When a search is submitted, `frontend/app.js` sends:
 
 to `POST /query`.
 
+The first search request runs the full backend search and returns the first page of rows plus a `search_id`. As the user scrolls, the frontend calls `GET /query/{search_id}` with the next `offset` and `limit`, so additional pages are sliced from the cached backend result instead of rerunning NBA API calls.
+
 ### 2. FastAPI Layer
 
 `backend/api.py` exposes the HTTP API:
@@ -72,6 +75,7 @@ to `POST /query`.
 - `GET /seasons`: supported seasons for the UI dropdown.
 - `GET /vocabulary`: live parser vocabulary and aliases.
 - `POST /query`: runs a search and returns paged results.
+- `GET /query/{search_id}`: returns additional pages from a cached search.
 
 The API validates season and pagination input, reuses cached `SearchEngine` instances, converts pandas/numpy values into JSON-safe values, and returns warnings instead of crashing when NBA endpoints fail.
 
@@ -177,6 +181,7 @@ For PBPV3-enabled searches, play-by-play clock data can add `Clock` and `Seconds
 
 ```json
 {
+  "search_id": "e885dc419fff40cf8a0d79316602a1c6",
   "query": "cade assists duren dunk",
   "interpretation": "Cade Cunningham assists to Jalen Duren on dunk during the 2025-26 season",
   "latency_ms": 1200,
@@ -184,6 +189,7 @@ For PBPV3-enabled searches, play-by-play clock data can add `Clock` and `Seconds
   "filtered_result_count": 78,
   "limit": 25,
   "offset": 0,
+  "has_more": true,
   "warnings": [],
   "user_agent": "...",
   "query_params": {},
@@ -198,6 +204,7 @@ Warnings are expected when NBA endpoints timeout, return no rows, or when PBPV3 
 - NBA Stats endpoints are unofficial and can timeout.
 - Video availability is expected from `2018-19` onward; older seasons may have play data but not usable clips.
 - PBPV3 enrichment can be slow because it may fetch play-by-play data for many games.
+- Search result pages are cached in memory for a limited time. Restarting the API clears cached `search_id` values.
 
 ## Development Setup
 
@@ -215,7 +222,7 @@ The project is tested on Python 3.13. `requirements.txt` installs the spaCy Engl
 You can run the API and frontend manually in two terminals:
 
 ```powershell
-.\.venv\Scripts\python.exe -m uvicorn backend.api:app --host 127.0.0.1 --port 8000 --reload
+.\.venv\Scripts\python.exe -m uvicorn backend.api:app --host 127.0.0.1 --port 8000
 ```
 
 ```powershell
@@ -241,3 +248,5 @@ Or start both services together with:
 ```
 
 `start.ps1` launches FastAPI on `127.0.0.1:8000` and the static frontend on `127.0.0.1:5173`, then stops both child processes when the script exits.
+
+The default commands do not use Uvicorn's `--reload` flag because the file-watcher can be unstable on Windows/Python 3.13. Restart `start.ps1` after backend code changes.

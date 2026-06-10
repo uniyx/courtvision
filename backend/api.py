@@ -1,14 +1,19 @@
 """FastAPI wrapper for the NBA natural-language search engine."""
 
+from collections import OrderedDict
 from functools import lru_cache
 from math import isfinite
 from time import perf_counter
+from time import time
+from uuid import uuid4
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query as QueryParam
 from fastapi.middleware.cors import CORSMiddleware
+from nba_api.stats.endpoints import commonteamroster, leaguestandingsv3
 from pydantic import BaseModel, Field
 
+from backend.nba_client import build_nba_stats_headers
 from backend.names.aliases import PLAYER_ALIASES, TEAM_ALIASES
 from backend.names.keywords import (
     CONTEXT_KEYWORDS,
@@ -36,6 +41,16 @@ SUPPORTED_SEASONS = [
     "2018-19",
 ]
 
+SEARCH_CACHE_TTL_SECONDS = 30 * 60
+SEARCH_CACHE_MAX_ITEMS = 32
+search_cache = OrderedDict()
+TEAM_BROWSER_CACHE_TTL_SECONDS = 30 * 60
+TEAM_BROWSER_CACHE_MAX_ITEMS = 8
+team_browser_cache = OrderedDict()
+TEAM_ROSTER_CACHE_TTL_SECONDS = 30 * 60
+TEAM_ROSTER_CACHE_MAX_ITEMS = 128
+team_roster_cache = OrderedDict()
+
 class QueryRequest(BaseModel):
     """Client-provided search settings."""
 
@@ -49,6 +64,7 @@ class QueryRequest(BaseModel):
 class QueryResponse(BaseModel):
     """JSON-safe search response."""
 
+    search_id: str
     query: str
     interpretation: str
     latency_ms: int
@@ -56,6 +72,7 @@ class QueryResponse(BaseModel):
     filtered_result_count: int
     limit: int
     offset: int
+    has_more: bool
     warnings: list[str]
     user_agent: str
     query_params: dict
@@ -112,6 +129,247 @@ def sorted_mapping(mapping):
     return dict(sorted(mapping.items(), key=lambda item: item[0]))
 
 
+def scalar_or_default(value, default=None):
+    if value is None:
+        return default
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if hasattr(value, "item"):
+        value = value.item()
+    try:
+        if pd.isna(value):
+            return default
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, float) and not isfinite(value):
+        return default
+    return value
+
+
+def row_value(row, keys, default=None):
+    for key in keys:
+        if key in row:
+            value = scalar_or_default(row[key], default=None)
+            if value is not None and value != "":
+                return value
+    return default
+
+
+def team_logo_url(team_id):
+    return f"https://cdn.nba.com/logos/nba/{team_id}/primary/L/logo.svg"
+
+
+def build_player_record(row):
+    return {
+        "id": row_value(row, ["PLAYER_ID"]),
+        "name": row_value(row, ["PLAYER"], "Unknown Player"),
+        "slug": row_value(row, ["PLAYER_SLUG"]),
+        "number": row_value(row, ["NUM"], ""),
+        "position": row_value(row, ["POSITION"], ""),
+        "height": row_value(row, ["HEIGHT"], ""),
+        "weight": row_value(row, ["WEIGHT"], ""),
+        "age": row_value(row, ["AGE"], ""),
+        "experience": row_value(row, ["EXP"], ""),
+        "school": row_value(row, ["SCHOOL"], ""),
+    }
+
+
+def fetch_team_roster(team_id, season):
+    response = commonteamroster.CommonTeamRoster(
+        team_id=team_id,
+        season=season,
+        headers=build_nba_stats_headers(rotate_user_agent=True),
+        timeout=20,
+    )
+    frame = response.get_data_frames()[0]
+    players = [build_player_record(row) for row in frame.to_dict(orient="records")]
+    return sorted(players, key=lambda player: (player["name"] or "").lower())
+
+
+def build_team_record(row):
+    team_id = row_value(row, ["TeamID"])
+    abbreviation = row_value(row, ["TeamSlug"], "").upper()
+    city = row_value(row, ["TeamCity"], "")
+    nickname = row_value(row, ["TeamName"], "")
+    conference = row_value(row, ["Conference"], "")
+    conference_rank = row_value(row, ["PlayoffRank"], 999)
+
+    return {
+        "id": team_id,
+        "abbreviation": abbreviation,
+        "city": city,
+        "nickname": nickname,
+        "full_name": f"{city} {nickname}".strip(),
+        "conference": conference,
+        "conference_rank": conference_rank,
+        "division": row_value(row, ["Division"], ""),
+        "division_rank": row_value(row, ["DivisionRank"]),
+        "wins": row_value(row, ["WINS"], 0),
+        "losses": row_value(row, ["LOSSES"], 0),
+        "win_pct": row_value(row, ["WinPCT"], ""),
+        "record": row_value(row, ["Record"], ""),
+        "home": row_value(row, ["HOME"], ""),
+        "road": row_value(row, ["ROAD"], ""),
+        "last_10": row_value(row, ["L10"], ""),
+        "conference_record": row_value(row, ["ConferenceRecord"], ""),
+        "division_record": row_value(row, ["DivisionRecord"], ""),
+        "points_pg": row_value(row, ["PointsPG"], ""),
+        "opp_points_pg": row_value(row, ["OppPointsPG"], ""),
+        "diff_points_pg": row_value(row, ["DiffPointsPG"], ""),
+        "current_streak": row_value(row, ["strCurrentStreak", "CurrentStreak"], ""),
+        "logo_url": team_logo_url(team_id) if team_id else None,
+    }
+
+
+def prune_team_browser_cache():
+    now = time()
+    expired_keys = [
+        cache_key
+        for cache_key, entry in team_browser_cache.items()
+        if now - entry["created_at"] > TEAM_BROWSER_CACHE_TTL_SECONDS
+    ]
+    for cache_key in expired_keys:
+        team_browser_cache.pop(cache_key, None)
+
+    while len(team_browser_cache) > TEAM_BROWSER_CACHE_MAX_ITEMS:
+        team_browser_cache.popitem(last=False)
+
+
+def prune_team_roster_cache():
+    now = time()
+    expired_keys = [
+        cache_key
+        for cache_key, entry in team_roster_cache.items()
+        if now - entry["created_at"] > TEAM_ROSTER_CACHE_TTL_SECONDS
+    ]
+    for cache_key in expired_keys:
+        team_roster_cache.pop(cache_key, None)
+
+    while len(team_roster_cache) > TEAM_ROSTER_CACHE_MAX_ITEMS:
+        team_roster_cache.popitem(last=False)
+
+
+def fetch_team_browser(season):
+    response = leaguestandingsv3.LeagueStandingsV3(
+        season=season,
+        season_type="Regular Season",
+        league_id="00",
+        headers=build_nba_stats_headers(rotate_user_agent=True),
+        timeout=20,
+    )
+    standings = response.get_data_frames()[0]
+    teams = [build_team_record(row) for row in standings.to_dict(orient="records")]
+
+    def sort_key(team):
+        return (team["conference_rank"] or 999, -(team["wins"] or 0), team["full_name"])
+
+    east = sorted([team for team in teams if team["conference"] == "East"], key=sort_key)
+    west = sorted([team for team in teams if team["conference"] == "West"], key=sort_key)
+    return {
+        "season": season,
+        "conferences": [
+            {"name": "Eastern Conference", "conference": "East", "teams": east},
+            {"name": "Western Conference", "conference": "West", "teams": west},
+        ],
+        "warnings": [],
+    }
+
+
+def get_team_browser(season):
+    prune_team_browser_cache()
+    entry = team_browser_cache.get(season)
+    if entry:
+        entry["created_at"] = time()
+        team_browser_cache.move_to_end(season)
+        return entry["payload"]
+
+    try:
+        payload = fetch_team_browser(season)
+    except Exception as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"NBA standings request failed for {season}: {type(error).__name__}: {error}",
+        ) from error
+
+    team_browser_cache[season] = {"created_at": time(), "payload": payload}
+    return payload
+
+
+def get_team_roster(team_id, season):
+    prune_team_roster_cache()
+    cache_key = (season, int(team_id))
+    entry = team_roster_cache.get(cache_key)
+    if entry:
+        entry["created_at"] = time()
+        team_roster_cache.move_to_end(cache_key)
+        return entry["payload"]
+
+    try:
+        players = fetch_team_roster(team_id, season)
+    except Exception as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"NBA roster request failed for team {team_id} in {season}: {type(error).__name__}: {error}",
+        ) from error
+
+    payload = {"season": season, "team_id": team_id, "players": players}
+    team_roster_cache[cache_key] = {"created_at": time(), "payload": payload}
+    return payload
+
+
+def prune_search_cache():
+    now = time()
+    expired_ids = [
+        search_id
+        for search_id, entry in search_cache.items()
+        if now - entry["created_at"] > SEARCH_CACHE_TTL_SECONDS
+    ]
+    for search_id in expired_ids:
+        search_cache.pop(search_id, None)
+
+    while len(search_cache) > SEARCH_CACHE_MAX_ITEMS:
+        search_cache.popitem(last=False)
+
+
+def cache_search_result(result):
+    prune_search_cache()
+    search_id = uuid4().hex
+    search_cache[search_id] = {
+        "created_at": time(),
+        "result": result,
+    }
+    return search_id
+
+
+def get_cached_search_result(search_id):
+    prune_search_cache()
+    entry = search_cache.get(search_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Search result cache entry was not found or has expired.")
+
+    entry["created_at"] = time()
+    search_cache.move_to_end(search_id)
+    return entry["result"]
+
+
+def build_query_response(search_id, result, offset, limit, latency_ms):
+    return QueryResponse(
+        search_id=search_id,
+        query=result.query,
+        interpretation=result.interpretation,
+        latency_ms=latency_ms,
+        raw_result_count=result.raw_result_count,
+        filtered_result_count=result.result_count,
+        limit=limit,
+        offset=offset,
+        has_more=offset + limit < result.result_count,
+        warnings=result.warnings,
+        user_agent=result.user_agent,
+        query_params=result.query_params,
+        results=dataframe_records(result.results, offset, limit),
+    )
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -145,6 +403,28 @@ def vocabulary():
     }
 
 
+@app.get("/teams")
+def teams(season: str = DEFAULT_SEASON):
+    """Return standings-ranked teams for the team browser."""
+    if season not in SUPPORTED_SEASONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported season '{season}'. Supported seasons: {', '.join(SUPPORTED_SEASONS)}",
+        )
+    return get_team_browser(season)
+
+
+@app.get("/teams/{team_id}/roster")
+def team_roster(team_id: int, season: str = DEFAULT_SEASON):
+    """Return one team's roster for the selected season."""
+    if season not in SUPPORTED_SEASONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported season '{season}'. Supported seasons: {', '.join(SUPPORTED_SEASONS)}",
+        )
+    return get_team_roster(team_id, season)
+
+
 @app.post("/query", response_model=QueryResponse)
 def query(request: QueryRequest):
     started_at = perf_counter()
@@ -161,17 +441,18 @@ def query(request: QueryRequest):
         raise HTTPException(status_code=400, detail=str(error)) from error
 
     latency_ms = round((perf_counter() - started_at) * 1000)
+    search_id = cache_search_result(result)
 
-    return QueryResponse(
-        query=result.query,
-        interpretation=result.interpretation,
-        latency_ms=latency_ms,
-        raw_result_count=result.raw_result_count,
-        filtered_result_count=result.result_count,
-        limit=request.limit,
-        offset=request.offset,
-        warnings=result.warnings,
-        user_agent=result.user_agent,
-        query_params=result.query_params,
-        results=dataframe_records(result.results, request.offset, request.limit),
-    )
+    return build_query_response(search_id, result, request.offset, request.limit, latency_ms)
+
+
+@app.get("/query/{search_id}", response_model=QueryResponse)
+def query_page(
+    search_id: str,
+    offset: int = QueryParam(default=0, ge=0),
+    limit: int = QueryParam(default=25, ge=1, le=100),
+):
+    started_at = perf_counter()
+    result = get_cached_search_result(search_id)
+    latency_ms = round((perf_counter() - started_at) * 1000)
+    return build_query_response(search_id, result, offset, limit, latency_ms)
