@@ -10,7 +10,7 @@ from uuid import uuid4
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query as QueryParam
 from fastapi.middleware.cors import CORSMiddleware
-from nba_api.stats.endpoints import commonteamroster, leaguestandingsv3
+from nba_api.stats.endpoints import commonteamroster, leaguedashplayerstats, leaguestandingsv3
 from pydantic import BaseModel, Field
 
 from backend.nba_client import build_nba_stats_headers
@@ -159,9 +159,33 @@ def team_logo_url(team_id):
     return f"https://cdn.nba.com/logos/nba/{team_id}/primary/L/logo.svg"
 
 
-def build_player_record(row):
+def build_player_stats_record(row):
     return {
-        "id": row_value(row, ["PLAYER_ID"]),
+        "gp": row_value(row, ["GP"], 0),
+        "min": row_value(row, ["MIN"], 0),
+        "fgm": row_value(row, ["FGM"], 0),
+        "fga": row_value(row, ["FGA"], 0),
+        "fg_pct": row_value(row, ["FG_PCT"], ""),
+        "fg3m": row_value(row, ["FG3M"], 0),
+        "fg3a": row_value(row, ["FG3A"], 0),
+        "fg3_pct": row_value(row, ["FG3_PCT"], ""),
+        "ftm": row_value(row, ["FTM"], 0),
+        "fta": row_value(row, ["FTA"], 0),
+        "ft_pct": row_value(row, ["FT_PCT"], ""),
+        "reb": row_value(row, ["REB"], 0),
+        "ast": row_value(row, ["AST"], 0),
+        "stl": row_value(row, ["STL"], 0),
+        "blk": row_value(row, ["BLK"], 0),
+        "tov": row_value(row, ["TOV"], 0),
+        "pts": row_value(row, ["PTS"], 0),
+        "plus_minus": row_value(row, ["PLUS_MINUS"], 0),
+    }
+
+
+def build_player_record(row, stats_by_player_id):
+    player_id = row_value(row, ["PLAYER_ID"])
+    return {
+        "id": player_id,
         "name": row_value(row, ["PLAYER"], "Unknown Player"),
         "slug": row_value(row, ["PLAYER_SLUG"]),
         "number": row_value(row, ["NUM"], ""),
@@ -171,19 +195,38 @@ def build_player_record(row):
         "age": row_value(row, ["AGE"], ""),
         "experience": row_value(row, ["EXP"], ""),
         "school": row_value(row, ["SCHOOL"], ""),
+        "stats": stats_by_player_id.get(player_id, build_player_stats_record({})),
+    }
+
+
+def fetch_team_player_stats(team_id, season):
+    response = leaguedashplayerstats.LeagueDashPlayerStats(
+        team_id_nullable=team_id,
+        season=season,
+        season_type_all_star="Regular Season",
+        per_mode_detailed="Totals",
+        measure_type_detailed_defense="Base",
+        headers=build_nba_stats_headers(rotate_user_agent=True),
+        timeout=20,
+    )
+    frame = response.get_data_frames()[0]
+    return {
+        row_value(row, ["PLAYER_ID"]): build_player_stats_record(row)
+        for row in frame.to_dict(orient="records")
     }
 
 
 def fetch_team_roster(team_id, season):
-    response = commonteamroster.CommonTeamRoster(
+    roster_response = commonteamroster.CommonTeamRoster(
         team_id=team_id,
         season=season,
         headers=build_nba_stats_headers(rotate_user_agent=True),
         timeout=20,
     )
-    frame = response.get_data_frames()[0]
-    players = [build_player_record(row) for row in frame.to_dict(orient="records")]
-    return sorted(players, key=lambda player: (player["name"] or "").lower())
+    stats_by_player_id = fetch_team_player_stats(team_id, season)
+    roster_frame = roster_response.get_data_frames()[0]
+    players = [build_player_record(row, stats_by_player_id) for row in roster_frame.to_dict(orient="records")]
+    return sorted(players, key=lambda player: (-(player["stats"]["gp"] or 0), player["name"] or ""))
 
 
 def build_team_record(row):

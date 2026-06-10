@@ -248,5 +248,3 @@ Or start both services together with:
 ```
 
 `start.ps1` launches FastAPI on `127.0.0.1:8000` and the static frontend on `127.0.0.1:5173`, then stops both child processes when the script exits.
-
-The default commands do not use Uvicorn's `--reload` flag because the file-watcher can be unstable on Windows/Python 3.13. Restart `start.ps1` after backend code changes.

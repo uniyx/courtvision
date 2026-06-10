@@ -33,6 +33,7 @@ let teamsCacheBySeason = {};
 let teamRostersBySeason = {};
 let rosterLoadingTeamId = null;
 let rosterErrorsBySeason = {};
+let rosterSortState = { key: "gp", direction: "desc" };
 let selectedTeamId = null;
 let vocabularyCache = null;
 let expandedVocabularyGroups = new Set();
@@ -328,24 +329,92 @@ function teamStat(label, value) {
   `;
 }
 
-function renderPlayerRow(player) {
-  return `
-    <tr class="border-b border-line last:border-b-0 dark:border-zinc-800">
-      <td class="px-3 py-2 font-medium text-ink dark:text-zinc-100">${escapeHtml(player.name)}</td>
-      <td class="px-3 py-2 text-zinc-500 dark:text-zinc-400">${escapeHtml(player.number || "-")}</td>
-      <td class="px-3 py-2 text-zinc-500 dark:text-zinc-400">${escapeHtml(player.position || "-")}</td>
-      <td class="px-3 py-2 text-zinc-500 dark:text-zinc-400">${escapeHtml(player.height || "-")}</td>
-      <td class="px-3 py-2 text-zinc-500 dark:text-zinc-400">${escapeHtml(player.age || "-")}</td>
-      <td class="px-3 py-2 text-zinc-500 dark:text-zinc-400">${escapeHtml(player.experience || "-")}</td>
-      <td class="px-3 py-2 text-zinc-500 dark:text-zinc-400">${escapeHtml(player.school || "-")}</td>
-    </tr>
-  `;
+const ROSTER_COLUMNS = [
+  { key: "name", label: "Player", type: "text", className: "min-w-40 text-left" },
+  { key: "position", label: "Pos", type: "text" },
+  { key: "gp", label: "GP", type: "number" },
+  { key: "min", label: "MIN", type: "number" },
+  { key: "pts", label: "PTS", type: "number" },
+  { key: "reb", label: "REB", type: "number" },
+  { key: "ast", label: "AST", type: "number" },
+  { key: "fgm", label: "FG", type: "number" },
+  { key: "fga", label: "FGA", type: "number" },
+  { key: "fg_pct", label: "FG%", type: "percent" },
+  { key: "fg3_pct", label: "3P%", type: "percent" },
+  { key: "ft_pct", label: "FT%", type: "percent" },
+  { key: "stl", label: "STL", type: "number" },
+  { key: "blk", label: "BLK", type: "number" },
+  { key: "tov", label: "TOV", type: "number" }
+];
+
+function playerColumnValue(player, key) {
+  if (key === "name" || key === "position") {
+    return player[key] || "";
+  }
+
+  return player.stats?.[key] ?? "";
+}
+
+function formatRosterValue(player, column) {
+  const value = playerColumnValue(player, column.key);
+  if (value === null || value === undefined || value === "") {
+    return "-";
+  }
+
+  if (column.type === "percent") {
+    return formatPercent(value);
+  }
+
+  if (column.type === "number") {
+    const numericValue = Number(value);
+    if (Number.isNaN(numericValue)) {
+      return safeText(value);
+    }
+    return Number.isInteger(numericValue) ? String(numericValue) : numericValue.toFixed(1);
+  }
+
+  return safeText(value);
+}
+
+function sortRosterPlayers(players) {
+  const column = ROSTER_COLUMNS.find((candidate) => candidate.key === rosterSortState.key) || ROSTER_COLUMNS[0];
+  const directionMultiplier = rosterSortState.direction === "asc" ? 1 : -1;
+
+  return [...players].sort((firstPlayer, secondPlayer) => {
+    const firstValue = playerColumnValue(firstPlayer, column.key);
+    const secondValue = playerColumnValue(secondPlayer, column.key);
+
+    if (column.type === "number" || column.type === "percent") {
+      const firstNumber = Number(firstValue);
+      const secondNumber = Number(secondValue);
+      const normalizedFirst = Number.isNaN(firstNumber) ? -Infinity : firstNumber;
+      const normalizedSecond = Number.isNaN(secondNumber) ? -Infinity : secondNumber;
+      if (normalizedFirst !== normalizedSecond) {
+        return (normalizedFirst - normalizedSecond) * directionMultiplier;
+      }
+    } else {
+      const comparison = safeText(firstValue).localeCompare(safeText(secondValue));
+      if (comparison !== 0) {
+        return comparison * directionMultiplier;
+      }
+    }
+
+    return safeText(firstPlayer.name).localeCompare(safeText(secondPlayer.name));
+  });
+}
+
+function renderSortLabel(column) {
+  if (rosterSortState.key !== column.key) {
+    return column.label;
+  }
+
+  return `${column.label} ${rosterSortState.direction === "asc" ? "^" : "v"}`;
 }
 
 function renderTeamDetail(team) {
   const logoUrl = teamBrowserLogoUrl(team);
   const season = seasonSelect.value;
-  const players = teamRostersBySeason[season]?.[team.id] || [];
+  const players = sortRosterPlayers(teamRostersBySeason[season]?.[team.id] || []);
   const rosterError = rosterErrorsBySeason[season]?.[team.id] || "";
   const isRosterLoading = String(rosterLoadingTeamId) === String(team.id);
   const rosterMessage = rosterError || (isRosterLoading ? "Loading roster..." : "Roster unavailable.");
@@ -385,17 +454,37 @@ function renderTeamDetail(team) {
         <table class="min-w-full text-left text-xs">
           <thead class="border-b border-line text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
             <tr>
-              <th class="px-3 py-2 font-medium">Player</th>
-              <th class="px-3 py-2 font-medium">No.</th>
-              <th class="px-3 py-2 font-medium">Pos</th>
-              <th class="px-3 py-2 font-medium">Ht</th>
-              <th class="px-3 py-2 font-medium">Age</th>
-              <th class="px-3 py-2 font-medium">Exp</th>
-              <th class="px-3 py-2 font-medium">School</th>
+              ${ROSTER_COLUMNS.map(
+                (column) => `
+                  <th class="px-3 py-2 font-medium ${column.className || "text-right"}">
+                    <button class="inline-flex items-center gap-1 hover:text-ink dark:hover:text-zinc-100" type="button" data-roster-sort="${escapeHtml(column.key)}" title="Sort by ${escapeHtml(column.label)}">
+                      ${escapeHtml(renderSortLabel(column))}
+                    </button>
+                  </th>
+                `
+              ).join("")}
             </tr>
           </thead>
           <tbody>
-            ${players.length > 0 ? players.map(renderPlayerRow).join("") : `<tr><td class="px-3 py-3 text-zinc-500 dark:text-zinc-400" colspan="7">${escapeHtml(rosterMessage)}</td></tr>`}
+            ${
+              players.length > 0
+                ? players
+                    .map(
+                      (player) => `
+                        <tr class="cursor-pointer border-b border-line transition last:border-b-0 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800" data-player-name="${escapeHtml(player.name)}" title="Search ${escapeHtml(player.name)}">
+                          ${ROSTER_COLUMNS.map(
+                            (column) => `
+                              <td class="px-3 py-2 ${column.key === "name" ? "font-medium text-ink dark:text-zinc-100" : column.type === "text" ? "text-zinc-500 dark:text-zinc-400" : "text-right text-zinc-500 dark:text-zinc-400"}">
+                                ${escapeHtml(formatRosterValue(player, column))}
+                              </td>
+                            `
+                          ).join("")}
+                        </tr>
+                      `
+                    )
+                    .join("")
+                : `<tr><td class="px-3 py-3 text-zinc-500 dark:text-zinc-400" colspan="${ROSTER_COLUMNS.length}">${escapeHtml(rosterMessage)}</td></tr>`
+            }
           </tbody>
         </table>
       </div>
@@ -413,7 +502,7 @@ function renderConference(conference) {
         <h3 class="font-semibold">${escapeHtml(conference.name)}</h3>
         <span class="text-xs text-zinc-500 dark:text-zinc-400">${escapeHtml(teams.length)} teams</span>
       </div>
-      <div class="grid grid-cols-3 gap-2 sm:grid-cols-5 lg:grid-cols-8 xl:grid-cols-10">
+      <div class="mx-auto grid w-max grid-cols-[repeat(3,7rem)] gap-2 sm:grid-cols-[repeat(5,7rem)]">
         ${teams
           .map((team) => {
             const logoUrl = teamBrowserLogoUrl(team);
@@ -837,6 +926,26 @@ themeButton.addEventListener("click", toggleTheme);
 teamsButton.addEventListener("click", openTeams);
 closeTeamsButton.addEventListener("click", closeTeams);
 teamsContent.addEventListener("click", async (event) => {
+  const sortButton = event.target.closest("button[data-roster-sort]");
+  if (sortButton && teamsContent.contains(sortButton)) {
+    const sortKey = sortButton.dataset.rosterSort;
+    rosterSortState = {
+      key: sortKey,
+      direction: rosterSortState.key === sortKey && rosterSortState.direction === "desc" ? "asc" : "desc"
+    };
+    renderTeams(teamsCacheBySeason[seasonSelect.value]);
+    return;
+  }
+
+  const playerRow = event.target.closest("[data-player-name]");
+  if (playerRow && teamsContent.contains(playerRow)) {
+    const playerName = playerRow.dataset.playerName;
+    queryInput.value = playerName;
+    closeTeams();
+    await runSearch(playerName);
+    return;
+  }
+
   const button = event.target.closest("button[data-team-id]");
   if (!button || !teamsContent.contains(button)) {
     return;
