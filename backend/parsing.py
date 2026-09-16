@@ -5,14 +5,11 @@ from functools import lru_cache
 from backend.entities import (
     PLAYER_FUZZY_THRESHOLD,
     TEAM_FUZZY_THRESHOLD,
-    build_player_matcher,
-    build_team_matcher,
     candidate_spans as entity_candidate_spans,
-    get_default_matchers,
-    load_nlp,
+    get_player_lookup,
+    get_team_lookup,
     overlaps_blocked_range,
     resolve_entity_from_spans,
-    resolve_player,
 )
 from backend.names.keywords import (
     CONTEXT_KEYWORDS,
@@ -26,7 +23,7 @@ from backend.names.keywords import (
     TIME_CONTEXT_KEYWORDS,
 )
 from backend.nba_client import QUERY_PARAMS
-from backend.utils import normalize_name, remove_char_ranges, tokenize_query
+from backend.utils import normalize_name, query_token_ranges, remove_char_ranges, tokenize_query
 
 
 CONTROL_WORDS = {
@@ -111,9 +108,6 @@ def parse_keywords(query_text):
         if token in MISS_KEYWORDS:
             miss_filter = True
 
-    if shot_specifiers and context_measure == "PTS":
-        context_measure = "PTS"
-
     return {
         "context_measure": context_measure,
         "shot_specifiers": shot_specifiers,
@@ -177,20 +171,15 @@ def ignored_entity_tokens():
     return tokens
 
 
-def candidate_spans(doc, max_tokens=3):
-    return entity_candidate_spans(doc, ignored_tokens=ignored_entity_tokens(), max_tokens=max_tokens)
+def candidate_spans(query_text, max_tokens=3):
+    return entity_candidate_spans(query_text, ignored_tokens=ignored_entity_tokens(), max_tokens=max_tokens)
 
 
-def longest_match(matches):
-    """Prefer the longest entity phrase, then the earliest span."""
-    return max(matches, key=lambda match: (match[2] - match[1], -match[1]))
-
-
-def range_after_recipient_marker(doc):
+def range_after_recipient_marker(query_text):
     """Return the text range after assist-recipient markers such as 'to'."""
-    for token in doc:
-        if token.text.lower() in RECIPIENT_MARKER_WORDS:
-            return token.idx + len(token.text), len(doc.text)
+    for token, _, end in query_token_ranges(query_text):
+        if token in RECIPIENT_MARKER_WORDS:
+            return end, len(query_text)
     return None
 
 
@@ -206,23 +195,24 @@ def unique_player_by_name_part(text, player_lookup):
     return None
 
 
-def resolve_recipient_player(doc, player_lookup, blocked_ranges):
+def resolve_recipient_player(query_text, player_lookup, blocked_ranges):
     """Resolve a secondary player mentioned after 'to'/'for' recipient language."""
-    recipient_range = range_after_recipient_marker(doc)
+    recipient_range = range_after_recipient_marker(query_text)
     if not recipient_range:
         return None, None
 
     start, end = recipient_range
     blocked_ranges = [*blocked_ranges, (0, start)]
-    for span in candidate_spans(doc):
+    for span_text, start_char, end_char in candidate_spans(query_text):
+        span = (span_text, start_char, end_char)
         if overlaps_blocked_range(span, blocked_ranges):
             continue
-        player = unique_player_by_name_part(span.text, player_lookup)
+        player = unique_player_by_name_part(span_text, player_lookup)
         if player:
-            return player, (span.start_char, span.end_char)
+            return player, (start_char, end_char)
 
     return resolve_entity_from_spans(
-        doc,
+        query_text,
         player_lookup,
         PLAYER_FUZZY_THRESHOLD,
         ignored_tokens=ignored_entity_tokens(),
@@ -230,19 +220,20 @@ def resolve_recipient_player(doc, player_lookup, blocked_ranges):
     )
 
 
-def resolve_unmarked_recipient_player(doc, player_lookup, blocked_ranges):
+def resolve_unmarked_recipient_player(query_text, player_lookup, blocked_ranges):
     """Resolve a secondary player in assist queries without explicit 'to'/'for'."""
-    for span in candidate_spans(doc):
+    for span_text, start_char, end_char in candidate_spans(query_text):
+        span = (span_text, start_char, end_char)
         if overlaps_blocked_range(span, blocked_ranges):
             continue
 
-        normalized = normalize_name(span.text)
+        normalized = normalize_name(span_text)
         if normalized in player_lookup:
-            return player_lookup[normalized], (span.start_char, span.end_char)
+            return player_lookup[normalized], (start_char, end_char)
 
-        player = unique_player_by_name_part(span.text, player_lookup)
+        player = unique_player_by_name_part(span_text, player_lookup)
         if player:
-            return player, (span.start_char, span.end_char)
+            return player, (start_char, end_char)
 
     return None, None
 
@@ -258,40 +249,23 @@ def remove_control_words(text):
     return " ".join(tokens)
 
 
-def extract_query_parts(query_text, nlp=None, player_matcher=None, player_lookup=None, team_matcher=None, team_lookup=None):
+def extract_query_parts(query_text):
     """Split a full text query into player identity and basketball keywords."""
-    if any(value is None for value in (nlp, player_matcher, player_lookup, team_matcher, team_lookup)):
-        default_nlp, default_player_matcher, default_player_lookup, default_team_matcher, default_team_lookup = get_default_matchers()
-        nlp = nlp or default_nlp
-        player_matcher = player_matcher or default_player_matcher
-        player_lookup = player_lookup or default_player_lookup
-        team_matcher = team_matcher or default_team_matcher
-        team_lookup = team_lookup or default_team_lookup
-
-    doc = nlp(query_text)
-    player_matches = player_matcher(doc)
-
-    # Exact entity phrases win. Fuzzy matching only runs when spaCy's
-    # deterministic PhraseMatcher does not find a player/team span.
-    if player_matches:
-        _, start, end = longest_match(player_matches)
-        player_span = doc[start:end]
-        player = player_lookup[normalize_name(player_span.text)]
-        remove_ranges = [(player_span.start_char, player_span.end_char)]
-    else:
-        player, player_range = resolve_entity_from_spans(
-            doc,
-            player_lookup,
-            PLAYER_FUZZY_THRESHOLD,
-            ignored_tokens=ignored_entity_tokens(),
-        )
-        if not player:
-            raise ValueError(f"No player name found in query: '{query_text}'")
-        remove_ranges = [player_range]
+    player_lookup = get_player_lookup()
+    team_lookup = get_team_lookup()
+    player, player_range = resolve_entity_from_spans(
+        query_text,
+        player_lookup,
+        PLAYER_FUZZY_THRESHOLD,
+        ignored_tokens=ignored_entity_tokens(),
+    )
+    if not player:
+        raise ValueError(f"No player name found in query: '{query_text}'")
+    remove_ranges = [player_range]
 
     recipient_player = None
     recipient_range = None
-    recipient_player, recipient_range = resolve_recipient_player(doc, player_lookup, remove_ranges)
+    recipient_player, recipient_range = resolve_recipient_player(query_text, player_lookup, remove_ranges)
     if recipient_player and recipient_player["id"] == player["id"]:
         recipient_player = None
         recipient_range = None
@@ -299,7 +273,7 @@ def extract_query_parts(query_text, nlp=None, player_matcher=None, player_lookup
         preliminary_keyword_text = remove_control_words(remove_char_ranges(query_text, remove_ranges))
         preliminary_keyword_params = parse_keywords(preliminary_keyword_text)
         if preliminary_keyword_params["context_measure"] == "AST":
-            recipient_player, recipient_range = resolve_unmarked_recipient_player(doc, player_lookup, remove_ranges)
+            recipient_player, recipient_range = resolve_unmarked_recipient_player(query_text, player_lookup, remove_ranges)
             if recipient_player and recipient_player["id"] == player["id"]:
                 recipient_player = None
                 recipient_range = None
@@ -307,23 +281,15 @@ def extract_query_parts(query_text, nlp=None, player_matcher=None, player_lookup
         remove_ranges.append(recipient_range)
 
     opponent_team = None
-    team_matches = team_matcher(doc)
-    if team_matches:
-        team_match = longest_match(team_matches)
-        _, start, end = team_match
-        team_span = doc[start:end]
-        opponent_team = team_lookup[normalize_name(team_span.text)]
-        remove_ranges.append((team_span.start_char, team_span.end_char))
-    else:
-        opponent_team, team_range = resolve_entity_from_spans(
-            doc,
-            team_lookup,
-            TEAM_FUZZY_THRESHOLD,
-            ignored_tokens=ignored_entity_tokens(),
-            blocked_ranges=remove_ranges,
-        )
-        if opponent_team:
-            remove_ranges.append(team_range)
+    opponent_team, team_range = resolve_entity_from_spans(
+        query_text,
+        team_lookup,
+        TEAM_FUZZY_THRESHOLD,
+        ignored_tokens=ignored_entity_tokens(),
+        blocked_ranges=remove_ranges,
+    )
+    if opponent_team:
+        remove_ranges.append(team_range)
 
     keyword_text = remove_control_words(remove_char_ranges(query_text, remove_ranges))
 

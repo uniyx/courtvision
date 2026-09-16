@@ -2,13 +2,11 @@
 
 from functools import lru_cache
 
-import spacy
 from nba_api.stats.static import players, teams
 from rapidfuzz import fuzz, process
-from spacy.matcher import PhraseMatcher
 
 from backend.names.aliases import PLAYER_ALIASES, TEAM_ALIASES
-from backend.utils import normalize_name, tokenize_query
+from backend.utils import normalize_name, query_token_ranges, tokenize_query
 
 
 PLAYER_FUZZY_THRESHOLD = 82
@@ -17,7 +15,7 @@ TEAM_FUZZY_THRESHOLD = 84
 
 @lru_cache(maxsize=1)
 def get_player_lookup():
-    """Build the current active-player lookup used by spaCy, fuzzy matching, and ID resolution."""
+    """Build the current active-player lookup used for entity resolution."""
     player_lookup = {}
     for player in players.get_active_players():
         player_lookup[normalize_name(player["full_name"])] = player
@@ -64,76 +62,26 @@ def get_team_lookup():
     return team_lookup
 
 
-@lru_cache(maxsize=1)
-def load_nlp():
-    """Load spaCy's English model.
-
-    spaCy does not know anything NBA-specific. We use it as the text
-    engine that tokenizes user queries for our project-defined phrase matcher.
-    """
-    try:
-        return spacy.load("en_core_web_sm")
-    except OSError as error:
-        raise RuntimeError(
-            "spaCy model 'en_core_web_sm' is not installed. "
-            "Install requirements.txt before running text query extraction."
-        ) from error
-
-
-def build_player_matcher(nlp=None):
-    """Teach spaCy which full player names and aliases to recognize."""
-    nlp = nlp or load_nlp()
-    matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
-    player_lookup = get_player_lookup()
-    pattern_texts = set()
-    for player in player_lookup.values():
-        pattern_texts.add(player["full_name"])
-        pattern_texts.add(normalize_name(player["full_name"]))
-    pattern_texts.update(player_lookup.keys())
-
-    # PhraseMatcher gives deterministic exact matching before fuzzy matching
-    # is considered. This avoids guessing when the query already has a clean
-    # player/entity phrase.
-    patterns = [nlp.make_doc(pattern_text) for pattern_text in pattern_texts]
-    matcher.add("PLAYER", patterns)
-    return matcher, player_lookup
-
-
-def build_team_matcher(nlp=None):
-    """Teach spaCy which NBA team names and aliases to recognize."""
-    nlp = nlp or load_nlp()
-    matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
-    team_lookup = get_team_lookup()
-    patterns = [nlp.make_doc(name) for name in team_lookup.keys()]
-    matcher.add("TEAM", patterns)
-    return matcher, team_lookup
-
-
-@lru_cache(maxsize=1)
-def get_default_matchers():
-    nlp = load_nlp()
-    player_matcher, player_lookup = build_player_matcher(nlp)
-    team_matcher, team_lookup = build_team_matcher(nlp)
-    return nlp, player_matcher, player_lookup, team_matcher, team_lookup
-
-
-def is_searchable_span(span, ignored_tokens):
-    tokens = tokenize_query(span.text)
+def is_searchable_span(span_text, ignored_tokens):
+    tokens = tokenize_query(span_text)
     if not tokens:
         return False
     return not any(token in ignored_tokens for token in tokens)
 
 
-def candidate_spans(doc, ignored_tokens=None, max_tokens=3):
+def candidate_spans(query_text, ignored_tokens=None, max_tokens=3):
     """Generate short query spans that are plausible entity candidates."""
     ignored_tokens = ignored_tokens or set()
+    tokens = query_token_ranges(query_text)
     spans = []
-    for start in range(len(doc)):
-        for end in range(start + 1, min(len(doc), start + max_tokens) + 1):
-            span = doc[start:end]
-            if is_searchable_span(span, ignored_tokens):
-                spans.append(span)
-    return sorted(spans, key=lambda span: len(tokenize_query(span.text)), reverse=True)
+    for start in range(len(tokens)):
+        for end in range(start + 1, min(len(tokens), start + max_tokens) + 1):
+            start_char = tokens[start][1]
+            end_char = tokens[end - 1][2]
+            span_text = query_text[start_char:end_char]
+            if is_searchable_span(span_text, ignored_tokens):
+                spans.append((span_text, start_char, end_char))
+    return sorted(spans, key=lambda span: len(tokenize_query(span[0])), reverse=True)
 
 
 def best_fuzzy_choice(text, choices, threshold):
@@ -147,7 +95,7 @@ def best_fuzzy_choice(text, choices, threshold):
     if not match:
         return None
 
-    value, score, index = match
+    value, score, _ = match
 
     # If the next-best result is effectively tied, do not guess. This is
     # important for short names and abbreviations where false positives are
@@ -166,28 +114,31 @@ def best_fuzzy_choice(text, choices, threshold):
 
 
 def overlaps_blocked_range(span, blocked_ranges):
-    return any(span.start_char < end and span.end_char > start for start, end in blocked_ranges)
+    _, span_start, span_end = span
+    return any(span_start < end and span_end > start for start, end in blocked_ranges)
 
 
-def resolve_entity_from_spans(doc, lookup, threshold, ignored_tokens=None, blocked_ranges=None):
+def resolve_entity_from_spans(query_text, lookup, threshold, ignored_tokens=None, blocked_ranges=None):
     """Resolve an entity by trying exact span lookup first, then fuzzy fallback."""
     blocked_ranges = blocked_ranges or []
     choices = list(lookup.keys())
-    spans = candidate_spans(doc, ignored_tokens=ignored_tokens)
+    spans = candidate_spans(query_text, ignored_tokens=ignored_tokens)
 
-    for span in spans:
+    for span_text, start_char, end_char in spans:
+        span = (span_text, start_char, end_char)
         if overlaps_blocked_range(span, blocked_ranges):
             continue
-        normalized = normalize_name(span.text)
+        normalized = normalize_name(span_text)
         if normalized in lookup:
-            return lookup[normalized], (span.start_char, span.end_char)
+            return lookup[normalized], (start_char, end_char)
 
-    for span in spans:
+    for span_text, start_char, end_char in spans:
+        span = (span_text, start_char, end_char)
         if overlaps_blocked_range(span, blocked_ranges):
             continue
-        choice = best_fuzzy_choice(span.text, choices, threshold)
+        choice = best_fuzzy_choice(span_text, choices, threshold)
         if choice:
-            return lookup[choice], (span.start_char, span.end_char)
+            return lookup[choice], (start_char, end_char)
 
     return None, None
 

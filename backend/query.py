@@ -12,12 +12,6 @@ from backend.search_engine import SearchEngine
 TEXT_QUERY = "victor wembanyama dunk playoffs against thunder in may q4"
 
 
-def run_text_query(query_text=TEXT_QUERY, season="2025-26"):
-    """Run a text search and return the filtered results DataFrame."""
-    search_engine = SearchEngine(season)
-    return search_engine.query(query_text)
-
-
 def main():
     search_engine = SearchEngine("2025-26")
     search_result = search_engine.search(TEXT_QUERY)

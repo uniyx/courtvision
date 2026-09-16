@@ -12,7 +12,7 @@ import pandas as pd
 from backend.formatters import add_search_context, apply_keyword_filters, enrich_with_play_by_play, process_videos
 from backend.names.keywords import MONTH_LABELS, PERIOD_LABELS
 from backend.nba_client import build_nba_stats_headers, build_query_params, fetch_play_by_play, fetch_video_details
-from backend.parsing import extract_query_parts, get_default_matchers
+from backend.parsing import extract_query_parts
 
 
 logger = logging.getLogger(__name__)
@@ -57,39 +57,20 @@ class SearchEngine:
     def __init__(
         self,
         season="2025-26",
-        rotate_user_agent=True,
         retries=2,
         video_timeout=30,
         play_by_play_timeout=10,
         use_play_by_play=False,
     ):
         self.season = season
-        self.rotate_user_agent = rotate_user_agent
         self.retries = retries
         self.video_timeout = video_timeout
         self.play_by_play_timeout = play_by_play_timeout
         self.use_play_by_play = use_play_by_play
         self.play_by_play_cache = {}
 
-        # Matcher setup is process-cached. Engines for different seasons can
-        # share the same text parser because season only affects API params.
-        (
-            self.nlp,
-            self.player_matcher,
-            self.player_lookup,
-            self.team_matcher,
-            self.team_lookup,
-        ) = get_default_matchers()
-
     def parse(self, query_text):
-        return extract_query_parts(
-            query_text,
-            self.nlp,
-            self.player_matcher,
-            self.player_lookup,
-            self.team_matcher,
-            self.team_lookup,
-        )
+        return extract_query_parts(query_text)
 
     def build_query_params(self, query_parts):
         params = build_query_params(
@@ -199,7 +180,7 @@ class SearchEngine:
         """Run the complete search pipeline and return results plus metadata."""
         query_parts = self.parse(query_text)
         query_params = self.build_query_params(query_parts)
-        headers = build_nba_stats_headers(rotate_user_agent=self.rotate_user_agent)
+        headers = build_nba_stats_headers()
         keyword_params = query_parts["keyword_params"]
         season_types = [query_parts["season_type"]] if query_parts["season_type"] else DEFAULT_SEASON_TYPES
 
@@ -295,16 +276,3 @@ class SearchEngine:
             user_agent=headers["User-Agent"],
             warnings=warnings,
         )
-
-    def query(self, query_text):
-        """Convenience API for notebook users who only want the filtered DataFrame."""
-        search_result = self.search(query_text)
-        results = search_result.results.copy()
-        results.attrs["query"] = search_result.query
-        results.attrs["interpretation"] = search_result.interpretation
-        results.attrs["query_parts"] = search_result.query_parts
-        results.attrs["query_params"] = search_result.query_params
-        results.attrs["raw_result_count"] = search_result.raw_result_count
-        results.attrs["warnings"] = search_result.warnings
-        results.attrs["user_agent"] = search_result.user_agent
-        return results

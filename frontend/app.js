@@ -44,7 +44,6 @@ let hasMoreResults = false;
 let isLoadingMore = false;
 
 const PAGE_SIZE = 25;
-let resultObserver = null;
 
 const TEAM_IDS_BY_ABBREVIATION = {
   ATL: 1610612737,
@@ -107,10 +106,6 @@ function toggleTheme() {
 
 function getApiBase() {
   return apiBaseInput.value.trim().replace(/\/$/, "");
-}
-
-function formatScore(row) {
-  return `${row.Visitor_Team} ${row.Visitor_Points_After} @ ${row.Home_Team} ${row.Home_Points_After}`;
 }
 
 function teamLogoUrl(teamAbbreviation) {
@@ -844,15 +839,14 @@ function initializeResultObserver() {
     return;
   }
 
-  resultObserver = new IntersectionObserver(
+  new IntersectionObserver(
     (entries) => {
       if (entries.some((entry) => entry.isIntersecting)) {
         loadNextPage();
       }
     },
     { root: null, rootMargin: "600px 0px 600px 0px", threshold: 0 }
-  );
-  resultObserver.observe(loadMoreSentinel);
+  ).observe(loadMoreSentinel);
 }
 
 form.addEventListener("submit", (event) => {

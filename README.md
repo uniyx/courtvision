@@ -30,7 +30,6 @@ frontend/
   app.js                 Frontend state, API calls, rendering
 
 start.ps1                Starts API and frontend together on Windows
-start.md                 Manual run commands
 requirements.txt         Python dependencies
 ```
 
@@ -111,7 +110,7 @@ If a query does not specify `regular season` or `playoffs`, Courtvision searches
 - Clutch/time filters.
 - Score-context filters such as go-ahead or game-tying.
 
-Player and team matching is handled with spaCy `PhraseMatcher` first, then RapidFuzz fallback matching. Aliases such as `wemby`, `cade`, `duren`, `sga`, `okc`, and `mavs` live in `backend/names/aliases.py`.
+Player and team matching uses normalized local phrase lookup first, then RapidFuzz fallback matching. Aliases such as `wemby`, `cade`, `duren`, `sga`, `okc`, and `mavs` live in `backend/names/aliases.py`.
 
 Two-player assist queries are supported. Examples:
 
@@ -130,8 +129,7 @@ These parse as primary-player assists and locally filter descriptions to rows wh
 
 It handles:
 
-- Browser-like request headers.
-- Optional user-agent rotation.
+- Browser-like request headers with a fixed desktop user-agent.
 - VideoDetailsAsset requests.
 - PlayByPlayV3 requests.
 - Retries and warnings for transient failures.
@@ -215,7 +213,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-The project is tested on Python 3.13. `requirements.txt` installs the spaCy English model from the official model wheel URL.
+The project is tested on Python 3.13.
 
 ## How To Run
 

@@ -96,37 +96,8 @@ app.add_middleware(
 
 @lru_cache(maxsize=32)
 def get_engine(season: str, use_play_by_play: bool) -> SearchEngine:
-    """Reuse engines so spaCy matchers are not rebuilt on every request."""
+    """Reuse search engines across requests."""
     return SearchEngine(season=season, use_play_by_play=use_play_by_play)
-
-
-def to_json_safe(value):
-    """Convert pandas/numpy values into strict JSON-compatible primitives."""
-    if pd.isna(value):
-        return None
-    if isinstance(value, pd.Timestamp):
-        return value.isoformat()
-    if hasattr(value, "item"):
-        value = value.item()
-    if isinstance(value, float) and not isfinite(value):
-        return None
-    return value
-
-
-def dataframe_records(frame: pd.DataFrame, offset: int, limit: int) -> list[dict]:
-    """Return paged DataFrame records that FastAPI can serialize safely."""
-    if frame.empty:
-        return []
-
-    page = frame.iloc[offset : offset + limit].copy()
-    return [
-        {column: to_json_safe(value) for column, value in row.items()}
-        for row in page.to_dict(orient="records")
-    ]
-
-
-def sorted_mapping(mapping):
-    return dict(sorted(mapping.items(), key=lambda item: item[0]))
 
 
 def scalar_or_default(value, default=None):
@@ -144,6 +115,22 @@ def scalar_or_default(value, default=None):
     if isinstance(value, float) and not isfinite(value):
         return default
     return value
+
+
+def dataframe_records(frame: pd.DataFrame, offset: int, limit: int) -> list[dict]:
+    """Return paged DataFrame records that FastAPI can serialize safely."""
+    if frame.empty:
+        return []
+
+    page = frame.iloc[offset : offset + limit].copy()
+    return [
+        {column: scalar_or_default(value) for column, value in row.items()}
+        for row in page.to_dict(orient="records")
+    ]
+
+
+def sorted_mapping(mapping):
+    return dict(sorted(mapping.items(), key=lambda item: item[0]))
 
 
 def row_value(row, keys, default=None):
@@ -206,7 +193,7 @@ def fetch_team_player_stats(team_id, season):
         season_type_all_star="Regular Season",
         per_mode_detailed="Totals",
         measure_type_detailed_defense="Base",
-        headers=build_nba_stats_headers(rotate_user_agent=True),
+        headers=build_nba_stats_headers(),
         timeout=20,
     )
     frame = response.get_data_frames()[0]
@@ -220,7 +207,7 @@ def fetch_team_roster(team_id, season):
     roster_response = commonteamroster.CommonTeamRoster(
         team_id=team_id,
         season=season,
-        headers=build_nba_stats_headers(rotate_user_agent=True),
+        headers=build_nba_stats_headers(),
         timeout=20,
     )
     stats_by_player_id = fetch_team_player_stats(team_id, season)
@@ -264,32 +251,16 @@ def build_team_record(row):
     }
 
 
-def prune_team_browser_cache():
+def prune_cache(cache, ttl_seconds, max_items):
     now = time()
     expired_keys = [
-        cache_key
-        for cache_key, entry in team_browser_cache.items()
-        if now - entry["created_at"] > TEAM_BROWSER_CACHE_TTL_SECONDS
+        cache_key for cache_key, entry in cache.items() if now - entry["created_at"] > ttl_seconds
     ]
     for cache_key in expired_keys:
-        team_browser_cache.pop(cache_key, None)
+        cache.pop(cache_key, None)
 
-    while len(team_browser_cache) > TEAM_BROWSER_CACHE_MAX_ITEMS:
-        team_browser_cache.popitem(last=False)
-
-
-def prune_team_roster_cache():
-    now = time()
-    expired_keys = [
-        cache_key
-        for cache_key, entry in team_roster_cache.items()
-        if now - entry["created_at"] > TEAM_ROSTER_CACHE_TTL_SECONDS
-    ]
-    for cache_key in expired_keys:
-        team_roster_cache.pop(cache_key, None)
-
-    while len(team_roster_cache) > TEAM_ROSTER_CACHE_MAX_ITEMS:
-        team_roster_cache.popitem(last=False)
+    while len(cache) > max_items:
+        cache.popitem(last=False)
 
 
 def fetch_team_browser(season):
@@ -297,7 +268,7 @@ def fetch_team_browser(season):
         season=season,
         season_type="Regular Season",
         league_id="00",
-        headers=build_nba_stats_headers(rotate_user_agent=True),
+        headers=build_nba_stats_headers(),
         timeout=20,
     )
     standings = response.get_data_frames()[0]
@@ -319,7 +290,7 @@ def fetch_team_browser(season):
 
 
 def get_team_browser(season):
-    prune_team_browser_cache()
+    prune_cache(team_browser_cache, TEAM_BROWSER_CACHE_TTL_SECONDS, TEAM_BROWSER_CACHE_MAX_ITEMS)
     entry = team_browser_cache.get(season)
     if entry:
         entry["created_at"] = time()
@@ -339,7 +310,7 @@ def get_team_browser(season):
 
 
 def get_team_roster(team_id, season):
-    prune_team_roster_cache()
+    prune_cache(team_roster_cache, TEAM_ROSTER_CACHE_TTL_SECONDS, TEAM_ROSTER_CACHE_MAX_ITEMS)
     cache_key = (season, int(team_id))
     entry = team_roster_cache.get(cache_key)
     if entry:
@@ -361,17 +332,7 @@ def get_team_roster(team_id, season):
 
 
 def prune_search_cache():
-    now = time()
-    expired_ids = [
-        search_id
-        for search_id, entry in search_cache.items()
-        if now - entry["created_at"] > SEARCH_CACHE_TTL_SECONDS
-    ]
-    for search_id in expired_ids:
-        search_cache.pop(search_id, None)
-
-    while len(search_cache) > SEARCH_CACHE_MAX_ITEMS:
-        search_cache.popitem(last=False)
+    prune_cache(search_cache, SEARCH_CACHE_TTL_SECONDS, SEARCH_CACHE_MAX_ITEMS)
 
 
 def cache_search_result(result):
