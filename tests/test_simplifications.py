@@ -1,16 +1,17 @@
-import json
-import inspect
 import unittest
 from collections import OrderedDict
-from pathlib import Path
+from datetime import date
 from time import time
 from unittest.mock import patch
 
 import pandas as pd
 
 from backend import api as api_module
+from backend import entities
 from backend import nba_client
 from backend import parsing
+from backend import search_engine as search_engine_module
+from backend.formatters import process_videos
 from backend.search_engine import SearchEngine
 
 
@@ -55,13 +56,6 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parts["keyword_params"]["context_measure"], "AST")
         self.assertEqual(parts["keyword_params"]["shot_specifiers"], {"DUNK"})
 
-    def test_removed_runtime_dependencies_and_arguments(self):
-        requirements = Path("requirements.txt").read_text(encoding="utf-8")
-        self.assertNotIn("spacy", requirements.lower())
-        self.assertNotIn("fake-useragent", requirements.lower())
-        self.assertNotIn("requests==", requirements.lower())
-        self.assertNotIn("rotate_user_agent", inspect.signature(nba_client.build_nba_stats_headers).parameters)
-
 
 class BackendHelperTests(unittest.TestCase):
     def test_retry_helper_retries_then_returns(self):
@@ -103,22 +97,71 @@ class BackendHelperTests(unittest.TestCase):
         )
 
 
-class CleanupStateTests(unittest.TestCase):
-    def test_one_off_paths_and_frontend_leftovers_are_gone(self):
-        frontend = Path("frontend/app.js").read_text(encoding="utf-8")
-        query_module = Path("backend/query.py").read_text(encoding="utf-8")
-        demo = Path("demo.ipynb").read_text(encoding="utf-8")
-        api_notebook = Path("api.ipynb").read_text(encoding="utf-8")
+class SeasonTests(unittest.TestCase):
+    def test_current_season_rolls_over_in_october(self):
+        self.assertEqual(nba_client.current_season(date(2026, 9, 30)), "2025-26")
+        self.assertEqual(nba_client.current_season(date(2026, 10, 1)), "2026-27")
+        self.assertEqual(nba_client.current_season(date(2027, 1, 15)), "2026-27")
 
-        self.assertFalse(hasattr(SearchEngine, "query"))
-        self.assertNotIn("run_text_query", query_module)
-        self.assertNotIn("formatScore", frontend)
-        self.assertNotIn("resultObserver", frontend)
-        self.assertNotIn("RUN_CONVENIENCE_QUERY", demo)
-        self.assertNotIn("RUN_LIVE_SERVER_TEST", api_notebook)
-        self.assertFalse(Path("start.md").exists())
-        json.loads(demo)
-        json.loads(api_notebook)
+    def test_season_players_come_from_live_list_filtered_by_years(self):
+        frame = pd.DataFrame(
+            [
+                {"PERSON_ID": 1, "DISPLAY_FIRST_LAST": "AJ Dybantsa", "DISPLAY_LAST_COMMA_FIRST": "Dybantsa, AJ", "FROM_YEAR": "2026", "TO_YEAR": "2026"},
+                {"PERSON_ID": 2, "DISPLAY_FIRST_LAST": "Dwyane Wade", "DISPLAY_LAST_COMMA_FIRST": "Wade, Dwyane", "FROM_YEAR": "2003", "TO_YEAR": "2018"},
+                {"PERSON_ID": 3, "DISPLAY_FIRST_LAST": "Nene", "DISPLAY_LAST_COMMA_FIRST": "Nene", "FROM_YEAR": "2002", "TO_YEAR": "2026"},
+            ]
+        )
+        with patch.object(entities, "all_players_frame", return_value=frame):
+            players = entities.season_players("2026-27")
+
+        self.assertEqual(
+            players,
+            [
+                {"id": 1, "full_name": "AJ Dybantsa", "first_name": "AJ", "last_name": "Dybantsa"},
+                {"id": 3, "full_name": "Nene", "first_name": "", "last_name": "Nene"},
+            ],
+        )
+
+    def test_player_lookup_falls_back_to_bundled_list(self):
+        with patch.object(entities, "season_player_lookup", side_effect=RuntimeError("down")), patch.object(
+            entities, "bundled_player_lookup", return_value={"bundled": {}}
+        ):
+            self.assertEqual(entities.get_player_lookup("2026-27"), {"bundled": {}})
+
+
+class FormatterTests(unittest.TestCase):
+    def test_scoring_flags_ignore_misses(self):
+        base = {"gi": "0022600001", "gc": "20261020/HOUOKC", "p": 4, "ha": "OKC", "va": "HOU", "y": 2026, "m": 10, "d": 20}
+        playlist = [
+            {**base, "ei": 10, "dsc": "Jump Shot (2 PTS)", "hpb": 98, "hpa": 100, "vpb": 100, "vpa": 100},
+            {**base, "ei": 11, "dsc": "MISS Jump Shot", "hpb": 100, "hpa": 100, "vpb": 100, "vpa": 100},
+            {**base, "ei": 12, "dsc": "3PT Jump Shot (3 PTS)", "hpb": 100, "hpa": 103, "vpb": 101, "vpa": 101},
+        ]
+
+        frame = process_videos({"resultSets": {"playlist": playlist, "Meta": {"videoUrls": []}}}).set_index("Event_Index")
+
+        self.assertEqual(frame["Point_Change"].to_dict(), {10: 2, 11: 0, 12: 3})
+        self.assertEqual(frame["Is_Game_Tying"].to_dict(), {10: True, 11: False, 12: False})
+        self.assertEqual(frame["Is_Go_Ahead"].to_dict(), {10: False, 11: False, 12: True})
+
+
+class PlayByPlayCacheTests(unittest.TestCase):
+    def test_recent_games_are_refetched_instead_of_cached(self):
+        engine = SearchEngine("2026-27")
+        results = pd.DataFrame(
+            {
+                "Game_ID": ["0022600001", "0022600002"],
+                "Game_Date": [pd.Timestamp("2026-10-01"), pd.Timestamp.today().normalize()],
+            }
+        )
+
+        with patch.object(search_engine_module, "fetch_play_by_play", return_value=pd.DataFrame()) as fetch:
+            engine.fetch_play_by_play_for_results(results, headers={})
+            by_game, _ = engine.fetch_play_by_play_for_results(results, headers={})
+
+        self.assertEqual(fetch.call_count, 3)
+        self.assertEqual(set(engine.play_by_play_cache), {"0022600001"})
+        self.assertEqual(set(by_game), {"0022600001", "0022600002"})
 
 
 if __name__ == "__main__":

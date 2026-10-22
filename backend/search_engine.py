@@ -11,7 +11,13 @@ import pandas as pd
 
 from backend.formatters import add_search_context, apply_keyword_filters, enrich_with_play_by_play, process_videos
 from backend.names.keywords import MONTH_LABELS, PERIOD_LABELS
-from backend.nba_client import build_nba_stats_headers, build_query_params, fetch_play_by_play, fetch_video_details
+from backend.nba_client import (
+    build_nba_stats_headers,
+    build_query_params,
+    current_season,
+    fetch_play_by_play,
+    fetch_video_details,
+)
 from backend.parsing import extract_query_parts
 
 
@@ -56,13 +62,13 @@ class SearchEngine:
 
     def __init__(
         self,
-        season="2025-26",
+        season=None,
         retries=2,
         video_timeout=30,
         play_by_play_timeout=10,
         use_play_by_play=False,
     ):
-        self.season = season
+        self.season = season or current_season()
         self.retries = retries
         self.video_timeout = video_timeout
         self.play_by_play_timeout = play_by_play_timeout
@@ -70,7 +76,7 @@ class SearchEngine:
         self.play_by_play_cache = {}
 
     def parse(self, query_text):
-        return extract_query_parts(query_text)
+        return extract_query_parts(query_text, season=self.season)
 
     def build_query_params(self, query_parts):
         params = build_query_params(
@@ -148,26 +154,35 @@ class SearchEngine:
         play_by_play_by_game = {}
         warnings = []
         game_ids = sorted(results["Game_ID"].dropna().astype(str).unique())
+        # Game dates are US-local, so only games from before yesterday are surely
+        # finished; newer games are refetched so in-progress play-by-play never sticks.
+        finished_before = pd.Timestamp.today().normalize() - pd.Timedelta(days=1)
+        finished_game_ids = set(
+            results.loc[pd.to_datetime(results["Game_Date"]) < finished_before, "Game_ID"].astype(str)
+        )
         logger.info("Fetching play-by-play clock data for %s games", len(game_ids))
         logger.debug("Play-by-play game IDs: %s", game_ids)
 
         for game_id in game_ids:
             try:
-                if game_id not in self.play_by_play_cache:
+                if game_id in self.play_by_play_cache:
+                    logger.debug("Using cached PlayByPlayV3 for game_id=%s", game_id)
+                    play_by_play = self.play_by_play_cache[game_id]
+                else:
                     logger.debug("Fetching PlayByPlayV3 for game_id=%s", game_id)
-                    self.play_by_play_cache[game_id] = fetch_play_by_play(
+                    play_by_play = fetch_play_by_play(
                         game_id,
                         headers=headers,
                         retries=self.retries,
                         timeout=self.play_by_play_timeout,
                     )
-                else:
-                    logger.debug("Using cached PlayByPlayV3 for game_id=%s", game_id)
+                    if game_id in finished_game_ids:
+                        self.play_by_play_cache[game_id] = play_by_play
             except Exception as error:
                 logger.warning("Skipping PlayByPlayV3 enrichment for game_id=%s error=%r", game_id, error)
                 warnings.append(f"Could not fetch play-by-play clock data for game {game_id}: {type(error).__name__}: {error}")
                 continue
-            play_by_play_by_game[game_id] = self.play_by_play_cache[game_id]
+            play_by_play_by_game[game_id] = play_by_play
 
         logger.info(
             "Play-by-play enrichment fetched=%s failed=%s",
@@ -233,12 +248,8 @@ class SearchEngine:
 
         if keyword_params.get("clutch_seconds") and self.use_play_by_play and not raw_results.empty:
             try:
-                preliminary_params = {**keyword_params, "clutch_seconds": None}
-                preliminary_results = apply_keyword_filters(raw_results, preliminary_params)
-                preliminary_results = preliminary_results[
-                    preliminary_results["Period"].ge(4)
-                    & preliminary_results["Score_Diff"].le(5)
-                ].copy()
+                # Without clock columns, the clutch filter keeps only its period/score approximation.
+                preliminary_results = apply_keyword_filters(raw_results, keyword_params)
                 play_by_play_by_game, clock_warnings = self.fetch_play_by_play_for_results(
                     preliminary_results,
                     headers,

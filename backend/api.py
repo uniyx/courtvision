@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from nba_api.stats.endpoints import commonteamroster, leaguedashplayerstats, leaguestandingsv3
 from pydantic import BaseModel, Field
 
-from backend.nba_client import build_nba_stats_headers
+from backend.nba_client import build_nba_stats_headers, current_season, season_label
 from backend.names.aliases import PLAYER_ALIASES, TEAM_ALIASES
 from backend.names.keywords import (
     CONTEXT_KEYWORDS,
@@ -29,16 +29,10 @@ from backend.names.keywords import (
 from backend.search_engine import SearchEngine
 
 
-DEFAULT_SEASON = "2025-26"
+FIRST_VIDEO_SEASON_START = 2018  # usable clips start in 2018-19
+DEFAULT_SEASON = current_season()
 SUPPORTED_SEASONS = [
-    "2025-26",
-    "2024-25",
-    "2023-24",
-    "2022-23",
-    "2021-22",
-    "2020-21",
-    "2019-20",
-    "2018-19",
+    season_label(start_year) for start_year in range(int(DEFAULT_SEASON[:4]), FIRST_VIDEO_SEASON_START - 1, -1)
 ]
 
 SEARCH_CACHE_TTL_SECONDS = 30 * 60
@@ -331,6 +325,14 @@ def get_team_roster(team_id, season):
     return payload
 
 
+def require_supported_season(season):
+    if season not in SUPPORTED_SEASONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported season '{season}'. Supported seasons: {', '.join(SUPPORTED_SEASONS)}",
+        )
+
+
 def prune_search_cache():
     prune_cache(search_cache, SEARCH_CACHE_TTL_SECONDS, SEARCH_CACHE_MAX_ITEMS)
 
@@ -410,33 +412,21 @@ def vocabulary():
 @app.get("/teams")
 def teams(season: str = DEFAULT_SEASON):
     """Return standings-ranked teams for the team browser."""
-    if season not in SUPPORTED_SEASONS:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Unsupported season '{season}'. Supported seasons: {', '.join(SUPPORTED_SEASONS)}",
-        )
+    require_supported_season(season)
     return get_team_browser(season)
 
 
 @app.get("/teams/{team_id}/roster")
 def team_roster(team_id: int, season: str = DEFAULT_SEASON):
     """Return one team's roster for the selected season."""
-    if season not in SUPPORTED_SEASONS:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Unsupported season '{season}'. Supported seasons: {', '.join(SUPPORTED_SEASONS)}",
-        )
+    require_supported_season(season)
     return get_team_roster(team_id, season)
 
 
 @app.post("/query", response_model=QueryResponse)
 def query(request: QueryRequest):
     started_at = perf_counter()
-    if request.season not in SUPPORTED_SEASONS:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Unsupported season '{request.season}'. Supported seasons: {', '.join(SUPPORTED_SEASONS)}",
-        )
+    require_supported_season(request.season)
 
     engine = get_engine(request.season, request.use_play_by_play)
     try:

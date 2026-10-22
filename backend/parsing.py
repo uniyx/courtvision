@@ -249,9 +249,9 @@ def remove_control_words(text):
     return " ".join(tokens)
 
 
-def extract_query_parts(query_text):
+def extract_query_parts(query_text, season=None):
     """Split a full text query into player identity and basketball keywords."""
-    player_lookup = get_player_lookup()
+    player_lookup = get_player_lookup(season)
     team_lookup = get_team_lookup()
     player, player_range = resolve_entity_from_spans(
         query_text,

@@ -5,8 +5,10 @@ module centralizes browser-like headers, params, and retry behavior.
 """
 
 import logging
+from datetime import date
 from time import sleep
 
+from nba_api.stats.endpoints import commonallplayers
 from nba_api.stats.endpoints import playbyplayv3
 from nba_api.stats.endpoints import videodetailsasset
 
@@ -31,10 +33,21 @@ NBA_STATS_HEADERS = {
 }
 
 
+def season_label(start_year):
+    """Format an NBA season such as 2026 -> '2026-27'."""
+    return f"{start_year}-{str(start_year + 1)[-2:]}"
+
+
+def current_season(today=None):
+    """NBA seasons start in October, so January-September belong to the season that began last year."""
+    today = today or date.today()
+    return season_label(today.year if today.month >= 10 else today.year - 1)
+
+
 QUERY_PARAMS = {
     "team_id": 0,
     "context_measure_detailed": "PTS",
-    "season": "2025-26",
+    "season": current_season(),
     "season_type_all_star": "Regular Season",
     "last_n_games": 105,
     "month": 0,
@@ -150,4 +163,18 @@ def fetch_play_by_play(game_id, headers=None, retries=2, timeout=10):
         retries,
         warning_context=f"PlayByPlayV3 failed for game_id={game_id} timeout={timeout}",
         failure_context=f"NBA play-by-play request failed for game {game_id}",
+    )
+
+
+def fetch_all_players(headers=None, retries=1, timeout=20):
+    """Fetch every NBA player with FROM_YEAR/TO_YEAR, so rookies and past seasons resolve."""
+    return _request_with_retries(
+        lambda: commonallplayers.CommonAllPlayers(
+            is_only_current_season=0,
+            headers=headers or build_nba_stats_headers(),
+            timeout=timeout,
+        ).get_data_frames()[0],
+        retries,
+        warning_context=f"CommonAllPlayers failed timeout={timeout}",
+        failure_context="NBA player list request failed",
     )

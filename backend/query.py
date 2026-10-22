@@ -13,7 +13,7 @@ TEXT_QUERY = "victor wembanyama dunk playoffs against thunder in may q4"
 
 
 def main():
-    search_engine = SearchEngine("2025-26")
+    search_engine = SearchEngine()
     search_result = search_engine.search(TEXT_QUERY)
     results = search_result.results
 

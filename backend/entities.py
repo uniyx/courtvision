@@ -1,28 +1,80 @@
 """Entity lookup and fuzzy matching for NBA players and teams."""
 
+import logging
 from functools import lru_cache
 
+import pandas as pd
 from nba_api.stats.static import players, teams
 from rapidfuzz import fuzz, process
 
 from backend.names.aliases import PLAYER_ALIASES, TEAM_ALIASES
+from backend.nba_client import fetch_all_players
 from backend.utils import normalize_name, query_token_ranges, tokenize_query
 
+
+logger = logging.getLogger(__name__)
 
 PLAYER_FUZZY_THRESHOLD = 82
 TEAM_FUZZY_THRESHOLD = 84
 
 
+# ponytail: fetched once per process, so mid-season signings appear after an API restart.
 @lru_cache(maxsize=1)
-def get_player_lookup():
-    """Build the current active-player lookup used for entity resolution."""
+def all_players_frame():
+    return fetch_all_players()
+
+
+def season_players(season):
+    """Players who appeared in a season, shaped like nba_api's static player dicts."""
+    frame = all_players_frame()
+    start_year = int(season[:4])
+    in_season = frame[
+        pd.to_numeric(frame["FROM_YEAR"], errors="coerce").le(start_year)
+        & pd.to_numeric(frame["TO_YEAR"], errors="coerce").ge(start_year)
+    ]
+    season_list = []
+    for row in in_season.to_dict(orient="records"):
+        last_name, _, first_name = row["DISPLAY_LAST_COMMA_FIRST"].partition(", ")
+        season_list.append(
+            {
+                "id": row["PERSON_ID"],
+                "full_name": row["DISPLAY_FIRST_LAST"],
+                "first_name": first_name,
+                "last_name": last_name,
+            }
+        )
+    return season_list
+
+
+@lru_cache(maxsize=16)
+def season_player_lookup(season):
+    return build_player_lookup(season_players(season))
+
+
+@lru_cache(maxsize=1)
+def bundled_player_lookup():
+    return build_player_lookup(players.get_active_players())
+
+
+def get_player_lookup(season=None):
+    """Return the season's player lookup, or nba_api's bundled active list if the live list fails."""
+    if season:
+        try:
+            # Failures are not cached, so the live list is retried on the next query.
+            return season_player_lookup(season)
+        except Exception as error:
+            logger.warning("Using bundled active players for season=%s error=%r", season, error)
+    return bundled_player_lookup()
+
+
+def build_player_lookup(player_list):
+    """Build the normalized-name lookup used for entity resolution."""
     player_lookup = {}
-    for player in players.get_active_players():
+    for player in player_list:
         player_lookup[normalize_name(player["full_name"])] = player
 
-    # Aliases only become active when their target is present in the current
-    # active-player list. That keeps retired or future-only aliases from
-    # resolving to stale IDs.
+    # Aliases only become active when their target is present in the player
+    # list. That keeps retired or future-only aliases from resolving to stale IDs.
     full_name_lookup = {normalize_name(player["full_name"]): player for player in player_lookup.values()}
     for alias, full_name in PLAYER_ALIASES.items():
         normalized_full_name = normalize_name(full_name)
@@ -141,34 +193,3 @@ def resolve_entity_from_spans(query_text, lookup, threshold, ignored_tokens=None
             return lookup[choice], (start_char, end_char)
 
     return None, None
-
-
-def format_player_options(matches):
-    return ", ".join(player["full_name"] for player in matches[:8])
-
-
-def resolve_player(player_name):
-    """Resolve a direct player input into an active-player dict."""
-    normalized = normalize_name(player_name)
-    player_lookup = get_player_lookup()
-
-    if normalized in player_lookup:
-        return player_lookup[normalized]
-
-    matches = [
-        player
-        for player in player_lookup.values()
-        if normalized in {normalize_name(player["first_name"]), normalize_name(player["last_name"])}
-    ]
-
-    if len(matches) == 1:
-        return matches[0]
-
-    if len(matches) > 1:
-        raise ValueError(f"Ambiguous player name '{player_name}'. Matches: {format_player_options(matches)}")
-
-    choice = best_fuzzy_choice(player_name, list(player_lookup.keys()), PLAYER_FUZZY_THRESHOLD)
-    if choice:
-        return player_lookup[choice]
-
-    raise ValueError(f"No active NBA player found for '{player_name}'.")

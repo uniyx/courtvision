@@ -6,6 +6,8 @@ from urllib.parse import urlencode
 
 import pandas as pd
 
+from backend.nba_client import season_label
+
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +44,10 @@ VIDEO_COLUMNS = [
 def build_event_link(row):
     """Build the stable NBA stats event page link for a play."""
     game_id = str(row["Game_ID"])
-    season_start = 2000 + int(game_id[3:5])
     params = {
         "GameEventID": row["Event_Index"],
         "GameID": game_id,
-        "Season": f"{season_start}-{str(season_start + 1)[-2:]}",
+        "Season": season_label(2000 + int(game_id[3:5])),
         "flag": 1,
         "title": row["Description"],
     }
@@ -158,7 +159,7 @@ def process_videos(video_details):
     formatted.loc[home_scored, "Scoring_Margin_After"] = formatted.loc[home_scored, "Home_Score_Diff_After"]
     formatted.loc[visitor_scored, "Scoring_Margin_Before"] = -formatted.loc[visitor_scored, "Home_Score_Diff_Before"]
     formatted.loc[visitor_scored, "Scoring_Margin_After"] = -formatted.loc[visitor_scored, "Home_Score_Diff_After"]
-    formatted["Is_Game_Tying"] = formatted["Score_Diff_After"] == 0
+    formatted["Is_Game_Tying"] = formatted["Point_Change"].gt(0) & formatted["Score_Diff_After"].eq(0)
     formatted["Is_Go_Ahead"] = (
         formatted["Point_Change"].gt(0)
         & formatted["Scoring_Margin_Before"].le(0)
